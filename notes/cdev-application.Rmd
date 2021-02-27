@@ -143,7 +143,7 @@ sims_norms.de_performance =
             auc = auroc(1-de$adj.P.Val, is.diff)
             TP = length(intersect(true_deg.idx, deg.idx))
             FP = length(setdiff(deg.idx, true_deg.idx))
-          
+            FN = length(setdiff(setdiff(1:nrow(y), deg.idx), x$refs.idx))
             data.frame('Method' = processing,
                        'percentDE' = as.numeric(percentDE),
                        'cdev.vs.oracle' = x$cdevMatrix[processing,'Oracle'],
@@ -151,18 +151,21 @@ sims_norms.de_performance =
                        'TPR' = TP/length(true_deg.idx),
                        'FDR' = FP / length(deg.idx),
                        'FPR' = FP / length(x$refs.idx)
+                       # 'FNR' = 1 - TPR 
                        )
         })
     }) %>%
         unlist(recursive = FALSE) %>%
         do.call(rbind, .)
 
+sims_norms.de_performance$FNR = 1 - sims_norms.de_performance$TPR
 p_auc = ggplot(sims_norms.de_performance,aes(x=percentDE,y=AUC,color=factor(Method,levels=METHODS_ORDERED))) +
     geom_point() +
     geom_line() +
     xlim(c(0,1)) +
     ylim(c(0,1)) +
     guides(color=guide_legend(title = 'Method')) +
+    xlab('DE percentage') +
     # ggtitle('Simulation with heterogeneous FC') +
     theme_bw(base_size=13)
 
@@ -172,6 +175,7 @@ p_tpr = ggplot(sims_norms.de_performance,aes(x=percentDE,y=TPR,color=factor(Meth
     xlim(c(0,1)) +
     ylim(c(0,1)) +
     guides(color=guide_legend(title = 'Method')) +
+    xlab('DE percentage') +
     # ggtitle('Simulation with heterogeneous FC') +
     theme_bw(base_size=13)
 
@@ -182,6 +186,7 @@ p_fdr = ggplot(sims_norms.de_performance,aes(x=percentDE,y=FDR,color=factor(Meth
     xlim(c(0,1)) +
     ylim(c(0,1)) +
     guides(color=guide_legend(title = 'Method')) +
+    xlab('DE percentage') +
     # ggtitle('Simulation with heterogeneous FC') +
     theme_bw(base_size=13)
 
@@ -191,9 +196,24 @@ p_fpr = ggplot(sims_norms.de_performance,aes(x=percentDE,y=FPR,color=factor(Meth
     xlim(c(0,1)) +
     ylim(c(0,1)) +
     guides(color=guide_legend(title = 'Method')) +
+    xlab('DE percentage') +
     # ggtitle('Simulation with heterogeneous FC') +
     theme_bw(base_size=13)
+
+p_fnr = ggplot(sims_norms.de_performance,aes(x=percentDE,y=FNR,color=factor(Method,levels=METHODS_ORDERED))) +
+    geom_point() +
+    geom_line() +
+    xlim(c(0,1)) +
+    ylim(c(0,1)) +
+    guides(color=guide_legend(title = 'Method')) +
+    xlab('DE percentage') +
+    # ggtitle('Simulation with heterogeneous FC') +
+    theme_bw(base_size=13)
+print(p_auc)
+print(p_tpr)
 print(p_fdr)
+print(p_fpr)
+print(p_fnr)
 ```
 
 
@@ -203,6 +223,11 @@ Combining plots for publication
 egg::ggarrange(p_cdev + theme(axis.title.x = element_blank()),
                p_fpr + theme(axis.title.x = element_blank()),
                p_auc, ncol = 1)
+```
+```{r,fig.width=10,fig.height=4}
+egg::ggarrange(p_fpr + theme(legend.position = 'none') ,
+               p_fnr, nrow = 1)
+
 ```
 
 ### cdev vs AUC
