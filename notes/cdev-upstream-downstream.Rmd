@@ -1,0 +1,677 @@
+---
+title: "cdev value as a function of data characteristics"
+output: html_notebook
+---
+
+How does the value of cdev depend on different characteristics of the data set, such as the level of inter-group variation, the number of genes, the percentage of DE genes? We'll use simulation to explore those relationships.
+
+
+```{r setup, include = FALSE}
+library(magrittr)
+library(ggplot2)
+library(parallel)
+devtools::load_all('../')
+
+logFC = function(x, groups, log.base = 2, pseudocount = 0) {
+    G = unique(groups)
+    log(apply(x[,groups == G[2]], MARGIN = 1, mean) + pseudocount, base = log.base) - 
+        log(apply(x[,groups == G[1]], MARGIN = 1, mean) + pseudocount, base = log.base)
+}
+THEME_BASE_SIZE = 13
+```
+
+## Varying number of genes
+
+```{r}
+NSAMPLES = 40
+nGenes = c(2000,10000, 20000, 50000)
+percentDE = 0.5 
+foldChange = 4
+sims_g <- lapply(nGenes, function(nGene) {
+    simulate.counts(nGene, NSAMPLES/2,NSAMPLES/2,fc = foldChange, percentDE = percentDE, completelyAsymm = TRUE)
+}) %>%
+    set_names(as.character(nGenes))
+
+sims_g.ref = lapply(nGenes, function(nGene) {
+    sim = sims_g[[as.character(nGene)]]
+    normalize.by.refs(sim$counts, which(sim$differential == 0))
+}) %>%
+    set_names(as.character(nGenes))
+```
+
+```{r}
+n_data_points = 30
+
+sims_g.rand.norms =
+    lapply(nGenes, function(nGene) {
+        sim = sims_g[[as.character(nGene)]]
+        sim.norm.ref = sims_g.ref[[as.character(nGene)]]
+        trueRef.idx = which(sim$differential == 0)
+        trueDif.idx = which(sim$differential == 1)
+        NSCALE = min(length(trueDif.idx), length(trueRef.idx))
+        mclapply(seq(1,NSCALE, floor(NSCALE/n_data_points)), mc.cores = 1, FUN = function(n_diff) {
+            lapply(1:10, function(i) {
+                rand.dif = sample(trueDif.idx, size = n_diff)
+                rand.ref = sample(trueRef.idx, size = NSCALE - n_diff)
+                rand.subset = union(rand.ref, rand.dif)
+                raw = colSums(sim$counts[rand.subset,,drop= FALSE])
+                sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
+                scalingFactors = raw / geom.mean(raw)
+                
+                return(list('scalingFactors' = scalingFactors,
+                            'nGene' = nGene,
+                            'rand.subset' = rand.subset,
+                            'diffFraction' = n_diff/NSCALE,
+                            'n_diffs_in_scale' = n_diff,
+                            'diffVarTotal' = sum(var(sim$counts[rand.dif,])), # The total variance of the DE genes in the random set selected for scaling
+                            'cdev' =  cdev(sim.norm.i, sim.norm.ref)))
+            }) 
+        }) %>%
+        unlist(recursive = FALSE)
+    }) %>%
+    unlist(recursive = FALSE)
+```
+
+### DE tests
+
+```{r, message=FALSE}
+g_de.results = lapply(sims_g.rand.norms, function(sim.norm) {
+    
+    sim = sims_g[[as.character(sim.norm$nGene)]]
+    de.test.limma(sim$counts,
+            group = sim$conditions$condition,
+            norm.factors = sim.norm$scalingFactors) %>%
+        limma::topTable(n = Inf, sort.by = 'none', adjust.method = 'BH')
+})
+```
+
+```{r,fig.width=15,fig.height=4}
+performance.df = lapply(1:length(sims_g.rand.norms), function(i) {
+    
+    sim.norm = sims_g.rand.norms[[i]]
+    sim = sims_g[[as.character(sim.norm$nGene)]]
+    de = g_de.results[[i]]
+    deg.idx = which(de$adj.P.Val < 0.01)
+    auc = auroc(1-de$adj.P.Val, !!sim$differential)
+    TP = length(intersect(which(sim$differential == 1), deg.idx))
+    FP = length(setdiff(deg.idx, which(sim$differential == 1)))
+    idx.diff = sim.norm$rand.subset[which(sim$differential[sim.norm$rand.subset] == 1)]
+    
+    data.frame('cdev' = sim.norm$cdev,
+               'nGene' = sim.norm$nGene,
+               'diffFraction' = sim.norm$diffFraction,
+               'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
+               'diffVarTotal' = sim.norm$diffVarTotal,
+               'AUC' = auc,
+               'TPR' = TP/length(which(sim$differential == 1)),
+               'FDR' = FP / length(deg.idx),
+               'FPR' = FP / length(which(sim$differential == 0))
+               )
+}) %>%
+    do.call(rbind, .)
+
+ggplot(performance.df) +
+    facet_grid(. ~ nGene) +
+    geom_point(aes(x=AUC,y=cdev, color=nGene, group=nGene), alpha = 0.3)
+ggplot(performance.df) +
+    facet_grid(. ~ nGene) +
+    geom_point(aes(x=cdev,y=AUC, color=nGene, group=nGene), alpha = 0.3)
+# ggplot(performance.df) +
+#     geom_point(aes(x=diffVarTotal,y=cdev, color=(nGene), group=nGene), alpha = 0.3)
+```
+
+cdev vs reference set quality
+
+```{r}
+pl_cdev_vs_df.ngene = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=cdev, color=nGene, group=nGene), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+print(pl_cdev_vs_df.ngene)
+```
+cdev vs DE performance
+
+```{r}
+pl_cdev_vs_auc.ngene = ggplot(performance.df) +
+    geom_point(aes(x=cdev,y=AUC, color=nGene, group=nGene), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+print(pl_cdev_vs_auc.ngene)
+```
+## Varying fold-change
+
+```{r}
+NSAMPLES = 40
+nGene = 20000
+percentDE = 0.5 
+foldChanges= c(1.5, 2, 3, 4, 5, 6, 7, 8) 
+sims_f <- lapply(foldChanges, function(foldChange) {
+    simulate.counts(nGene, NSAMPLES/2,NSAMPLES/2,fc = foldChange, percentDE = percentDE, completelyAsymm = TRUE)
+}) %>%
+    set_names(as.character(foldChanges))
+
+sims_f.ref = lapply(foldChanges, function(foldChange) {
+    sim = sims_f[[as.character(foldChange)]]
+    normalize.by.refs(sim$counts, which(sim$differential == 0))
+}) %>%
+    set_names(as.character(foldChanges))
+```
+
+```{r}
+
+sims_f.rand.norms =
+    lapply(foldChanges, function(foldChange) {
+        sim = sims_f[[as.character(foldChange)]]
+        sim.norm.ref = sims_f.ref[[as.character(foldChange)]]
+        trueRef.idx = which(sim$differential == 0)
+        trueDif.idx = which(sim$differential == 1)
+        NSCALE = min(length(trueDif.idx), length(trueRef.idx))
+        mclapply(seq(1,NSCALE, floor(NSCALE/n_data_points)), mc.cores = 1, FUN = function(n_diff) {
+            lapply(1:10, function(i) {
+                rand.dif = sample(trueDif.idx, size = n_diff)
+                rand.ref = sample(trueRef.idx, size = NSCALE - n_diff)
+                rand.subset = union(rand.ref, rand.dif)
+                raw = colSums(sim$counts[rand.subset,,drop= FALSE])
+                sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
+                scalingFactors = raw / geom.mean(raw)
+               
+                mseRefs = mean((logFC(sim.norm.i[trueRef.idx,], sim$conditions$condition, log.base = 2, pseudocount = 1))^2) 
+                return(list('scalingFactors' = scalingFactors,
+                            'foldChange' = foldChange,
+                            'rand.subset' = rand.subset,
+                            'diffFraction' = n_diff/NSCALE,
+                            'n_diffs_in_scale' = n_diff,
+                            'diffVarTotal' = sum(var(sim$counts[rand.dif,])), # The total variance of the DE genes in the random set selected for scaling
+                            'cdev' =  cdev(sim.norm.i, sim.norm.ref),
+                            'mseRefs' = mseRefs))
+            }) 
+        }) %>%
+        unlist(recursive = FALSE)
+    }) %>%
+    unlist(recursive = FALSE)
+```
+
+### DE tests
+
+```{r, message=FALSE}
+f_de.results = lapply(sims_f.rand.norms, function(sim.norm) {
+    
+    sim = sims_f[[as.character(sim.norm$foldChange)]]
+    de.test.limma(sim$counts,
+            group = sim$conditions$condition,
+            norm.factors = sim.norm$scalingFactors) %>%
+        limma::topTable(n = Inf, sort.by = 'none', adjust.method = 'BH')
+})
+```
+
+```{r}
+performance.df = lapply(1:length(sims_f.rand.norms), function(i) {
+    
+    sim.norm = sims_f.rand.norms[[i]]
+    sim = sims_f[[as.character(sim.norm$foldChange)]]
+    de = f_de.results[[i]]
+    deg.idx = which(de$adj.P.Val < 0.01)
+    
+    auc = auroc(1-de$adj.P.Val, !!sim$differential)
+    TP = length(intersect(which(sim$differential == 1), deg.idx))
+    FP = length(setdiff(deg.idx, which(sim$differential == 1)))
+    idx.diff = sim.norm$rand.subset[which(sim$differential[sim.norm$rand.subset] == 1)]
+    
+    data.frame('cdev' = sim.norm$cdev,
+               'foldChange' = sim.norm$foldChange,
+               'diffFraction' = sim.norm$diffFraction,
+               'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
+               'diffVarTotal' = sim.norm$diffVarTotal,
+               'AUC' = auc,
+               'TPR' = TP/length(which(sim$differential == 1)),
+               'FDR' = FP / length(deg.idx),
+               'FPR' = FP / length(which(sim$differential == 0))
+               )
+}) %>%
+    do.call(rbind, .)
+pl_cdev_vs_df.foldchange = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=cdev, color=foldChange, group=foldChange), alpha = 0.5) +
+    # guides(color=guide_legend(title = 'Fold-change')) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+pl_df_vs_auc.foldchange = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=AUC, color=foldChange, group=foldChange), alpha = 0.5) +
+    # guides(color=guide_legend(title = 'Fold-change')) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+pl_cdev_vs_auc.foldchange = ggplot(performance.df) +
+    geom_point(aes(x=cdev,y=AUC, color=foldChange, group=foldChange), alpha = 0.5) +
+    # guides(color=guide_legend(title = 'Fold-change')) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+
+print(pl_cdev_vs_df.foldchange)
+print(pl_cdev_vs_auc.foldchange)
+print(pl_df_vs_auc.foldchange)
+```
+
+## Varying DE percentage
+
+```{r}
+NSAMPLES = 40
+nGene = 10000 
+percentDEs = c(1:9/10) 
+foldChange = 4
+sims_p <- lapply(percentDEs, function(percentDE) {
+    simulate.counts(nGene, NSAMPLES/2,NSAMPLES/2,fc = foldChange, percentDE = percentDE, completelyAsymm = TRUE)
+}) %>%
+    set_names(as.character(percentDEs))
+
+sims_p.ref = lapply(percentDEs, function(percentDE) {
+    sim = sims_p[[as.character(percentDE)]]
+    normalize.by.refs(sim$counts, which(sim$differential == 0))
+}) %>%
+    set_names(as.character(percentDEs))
+```
+
+Normalizing by a random set of equivalent size to the true reference set
+
+```{r}
+# diffFractions = c(0:50/50)
+
+sims_p.rand.norms =
+    lapply(percentDEs, function(percentDE) {
+        sim = sims_p[[as.character(percentDE)]]
+        sim.norm.ref = sims_p.ref[[as.character(percentDE)]]
+        trueRef.idx = which(sim$differential == 0)
+        trueDif.idx = which(sim$differential == 1)
+        
+        NSCALE = min(length(trueDif.idx), length(trueRef.idx))
+        mclapply(seq(1,NSCALE, floor(NSCALE/n_data_points)), mc.cores = 1, FUN = function(n_diff) {
+            lapply(1:10, function(i) {
+                rand.dif = sample(trueDif.idx, size = n_diff)
+                rand.ref = sample(trueRef.idx, size = NSCALE - n_diff)
+                   
+                rand.subset = union(rand.ref, rand.dif)
+                raw = colSums(sim$counts[rand.subset,,drop= FALSE])
+                sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
+                scalingFactors = raw / geom.mean(raw)
+                
+                return(list('scalingFactors' = scalingFactors,
+                            'percentDE' = percentDE,
+                            'rand.subset' = rand.subset,
+                            'n_diffs_in_scale' = n_diff,
+                            'diffFraction' = n_diff/NSCALE,
+                            'diffVarTotal' = sum(var(sim$counts[rand.dif,])), # The total variance of the DE genes in the random set selected for scaling
+                            'cdev' =  cdev(sim.norm.i, sim.norm.ref)))
+            }) 
+        }) %>%
+        unlist(recursive = FALSE)
+    }) %>%
+    unlist(recursive = FALSE)
+```
+
+### DE tests
+
+```{r, message=FALSE}
+p_de.results = lapply(sims_p.rand.norms, function(sim.norm) {
+    
+    sim = sims_p[[as.character(sim.norm$percentDE)]]
+    de.test.limma(sim$counts,
+            group = sim$conditions$condition,
+            norm.factors = sim.norm$scalingFactors) %>%
+        limma::topTable(n = Inf, sort.by = 'none', adjust.method = 'BH')
+})
+```
+
+```{r}
+performance.df = lapply(1:length(sims_p.rand.norms), function(i) {
+    
+    sim.norm = sims_p.rand.norms[[i]]
+    sim = sims_p[[as.character(sim.norm$percentDE)]]
+    de = p_de.results[[i]]
+    deg.idx = which(de$adj.P.Val < 0.01)
+    
+    auc = auroc(1-de$adj.P.Val, !!sim$differential)
+    TP = length(intersect(which(sim$differential == 1), deg.idx))
+    FP = length(setdiff(deg.idx, which(sim$differential == 1)))
+    idx.diff = sim.norm$rand.subset[which(sim$differential[sim.norm$rand.subset] == 1)]
+    
+    data.frame('cdev' = sim.norm$cdev,
+               'percentDE' = sim.norm$percentDE,
+               'diffFraction' = sim.norm$diffFraction,
+               'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
+               'diffVarTotal' = sim.norm$diffVarTotal,
+               'AUC' = auc,
+               'TPR' = TP/length(which(sim$differential == 1)),
+               'FDR' = FP / length(deg.idx),
+               'FPR' = FP / length(which(sim$differential == 0))
+               )
+}) %>%
+    do.call(rbind, .)
+pl_cdev_vs_df.percentDE = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=cdev, color=percentDE, group=percentDE), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+
+pl_cdev_vs_auc.percentDE = ggplot(performance.df) +
+    geom_point(aes(x=cdev,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+print(pl_cdev_vs_df.percentDE)
+print(pl_cdev_vs_auc.percentDE)
+```
+
+```{r,fig.width=5,fig.height=12}
+ggplot(performance.df) +
+    facet_grid(percentDE ~ .) +
+    geom_point(aes(x=cdev,y=AUC, color=percentDE, group=percentDE), alpha = 0.3)
+```
+
+
+Normalizing by a random set of any size 
+
+```{r}
+# diffFractions = c(0:50/50)
+
+sims_p.rand.norms =
+    lapply(percentDEs, function(percentDE) {
+        sim = sims_p[[as.character(percentDE)]]
+        sim.norm.ref = sims_p.ref[[as.character(percentDE)]]
+        trueRef.idx = which(sim$differential == 0)
+        trueDif.idx = which(sim$differential == 1)
+        
+        NSCALE = min(length(trueDif.idx), length(trueRef.idx))
+        mclapply(seq(1,NSCALE, floor(NSCALE/n_data_points)), mc.cores = 1, FUN = function(n_diff) {
+            lapply(1:10, function(i) {
+                rand.dif = sample(trueDif.idx, size = n_diff)
+                rand.ref = sample(trueRef.idx, size = NSCALE - n_diff)
+                   
+                rand.subset = union(rand.ref, rand.dif)
+                raw = colSums(sim$counts[rand.subset,,drop= FALSE])
+                sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
+                scalingFactors = raw / geom.mean(raw)
+                
+                return(list('scalingFactors' = scalingFactors,
+                            'percentDE' = percentDE,
+                            'rand.subset' = rand.subset,
+                            'n_diffs_in_scale' = n_diff,
+                            'diffFraction' = n_diff/NSCALE,
+                            'diffVarTotal' = sum(var(sim$counts[rand.dif,])), # The total variance of the DE genes in the random set selected for scaling
+                            'cdev' =  cdev(sim.norm.i, sim.norm.ref)))
+            }) 
+        }) %>%
+        unlist(recursive = FALSE)
+    }) %>%
+    unlist(recursive = FALSE)
+```
+
+```{r}
+performance.df = lapply(1:length(sims_p.rand.norms), function(i) {
+    
+    sim.norm = sims_p.rand.norms[[i]]
+    sim = sims_p[[as.character(sim.norm$percentDE)]]
+    
+    data.frame('cdev' = sim.norm$cdev,
+               'percentDE' = sim.norm$percentDE,
+               'diffFraction' = sim.norm$diffFraction,
+               'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
+               'diffVarTotal' = sim.norm$diffVarTotal
+               )
+}) %>%
+    do.call(rbind, .)
+```
+
+
+```{r,fig.width=5,fig.height=12}
+ggplot(performance.df) +
+    facet_grid(percentDE ~ .) +
+    geom_point(aes(x=n_diffs_in_scale,y=cdev, color=percentDE, group=percentDE), alpha = 0.3)
+```
+
+
+```{r}
+ggplot(performance.df) +
+    geom_point(aes(x=n_diffs_in_scale,y=cdev, color=percentDE, group=percentDE), alpha = 0.3)
+ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=cdev, color=percentDE, group=percentDE), alpha = 0.3)
+# ggplot(performance.df) +
+#     geom_point(aes(x=diffVarTotal,y=cdev, color=(nGene), group=nGene), alpha = 0.3)
+```
+
+## Realistic simulations: heterogenous fold-changes
+
+### Varying number of genes
+
+```{r}
+NSAMPLES = 40
+nGenes = c(2000,10000, 20000, 50000)
+percentDE = 0.5 
+foldChange = 4
+sims_rg <- lapply(nGenes, function(nGene) {
+    simulate.counts.varyingfc(ngenes = nGene, nlibs1 = NSAMPLES %/% 2, nlibs2= NSAMPLES - (NSAMPLES %/% 2), percentDE = percentDE)
+}) %>%
+    set_names(as.character(nGenes))
+
+sims_rg.ref = lapply(nGenes, function(nGene) {
+    sim = sims_rg[[as.character(nGene)]]
+    normalize.by.refs(sim$counts, which(sim$differential == 0))
+}) %>%
+    set_names(as.character(nGenes))
+```
+```{r}
+
+sims_rg.rand.norms =
+    lapply(nGenes, function(nGene) {
+        sim = sims_rg[[as.character(nGene)]]
+        sim.norm.ref = sims_rg.ref[[as.character(nGene)]]
+        trueRef.idx = which(sim$differential == 0)
+        trueDif.idx = which(sim$differential == 1)
+        NSCALE = min(length(trueDif.idx), length(trueRef.idx))
+        mclapply(seq(1,NSCALE, floor(NSCALE/n_data_points)), mc.cores = 1, FUN = function(n_diff) {
+            lapply(1:10, function(i) {
+                rand.dif = sample(trueDif.idx, size = n_diff)
+                rand.ref = sample(trueRef.idx, size = NSCALE - n_diff)
+                rand.subset = union(rand.ref, rand.dif)
+                raw = colSums(sim$counts[rand.subset,,drop= FALSE])
+                sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
+                scalingFactors = raw / geom.mean(raw)
+                
+                return(list('scalingFactors' = scalingFactors,
+                            'nGene' = nGene,
+                            'rand.subset' = rand.subset,
+                            'diffFraction' = n_diff/NSCALE,
+                            'n_diffs_in_scale' = n_diff,
+                            'diffVarTotal' = sum(var(sim$counts[rand.dif,])), # The total variance of the DE genes in the random set selected for scaling
+                            'cdev' =  cdev(sim.norm.i, sim.norm.ref)))
+            }) 
+        }) %>%
+        unlist(recursive = FALSE)
+    }) %>%
+    unlist(recursive = FALSE)
+```
+
+#### DE tests
+
+```{r, message=FALSE}
+rg_de.results = lapply(sims_rg.rand.norms, function(sim.norm) {
+    
+    sim = sims_rg[[as.character(sim.norm$nGene)]]
+    de.test.limma(sim$counts,
+            group = sim$conditions$condition,
+            norm.factors = sim.norm$scalingFactors) %>%
+        limma::topTable(n = Inf, sort.by = 'none', adjust.method = 'BH')
+})
+```
+
+```{r,fig.width=15,fig.height=4}
+performance.df = lapply(1:length(sims_rg.rand.norms), function(i) {
+    
+    sim.norm = sims_rg.rand.norms[[i]]
+    sim = sims_rg[[as.character(sim.norm$nGene)]]
+    de = rg_de.results[[i]]
+    deg.idx = which(de$adj.P.Val < 0.01)
+    auc = auroc(1-de$adj.P.Val, !!sim$differential)
+    TP = length(intersect(which(sim$differential == 1), deg.idx))
+    FP = length(setdiff(deg.idx, which(sim$differential == 1)))
+    idx.diff = sim.norm$rand.subset[which(sim$differential[sim.norm$rand.subset] == 1)]
+    
+    data.frame('cdev' = sim.norm$cdev,
+               'nGene' = sim.norm$nGene,
+               'diffFraction' = sim.norm$diffFraction,
+               'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
+               'diffVarTotal' = sim.norm$diffVarTotal,
+               'AUC' = auc,
+               'TPR' = TP/length(which(sim$differential == 1)),
+               'FDR' = FP / length(deg.idx),
+               'FPR' = FP / length(which(sim$differential == 0))
+               )
+}) %>%
+    do.call(rbind, .)
+
+ggplot(performance.df) +
+    facet_grid(. ~ nGene) +
+    geom_point(aes(x=AUC,y=cdev, color=nGene, group=nGene), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+ggplot(performance.df) +
+    facet_grid(. ~ nGene) +
+    geom_point(aes(x=cdev,y=AUC, color=nGene, group=nGene), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+```
+
+```{r}
+p2_cdev_vs_df.ngene = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=cdev, color=nGene, group=nGene), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+print(p2_cdev_vs_df.ngene)
+```
+
+```{r}
+p2_cdev_vs_auc.ngene = ggplot(performance.df) +
+    geom_point(aes(x=cdev,y=AUC, color=nGene, group=nGene), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+print(p2_cdev_vs_auc.ngene)
+```
+
+### Varying DE percentage
+
+```{r}
+NSAMPLES = 40
+nGene = 10000 
+percentDEs = c(1:9/10) 
+foldChange = 4
+sims_rp <- lapply(percentDEs, function(percentDE) {
+    simulate.counts.varyingfc(ngenes = nGene, nlibs1 = NSAMPLES %/% 2, nlibs2= NSAMPLES - (NSAMPLES %/% 2), percentDE = percentDE)
+}) %>%
+    set_names(as.character(percentDEs))
+
+sims_rp.ref = lapply(percentDEs, function(percentDE) {
+    sim = sims_rp[[as.character(percentDE)]]
+    normalize.by.refs(sim$counts, which(sim$differential == 0))
+}) %>%
+    set_names(as.character(percentDEs))
+```
+
+Normalizing by a random set of equivalent size to the true reference set
+
+```{r}
+# diffFractions = c(0:50/50)
+
+sims_rp.rand.norms =
+    lapply(percentDEs, function(percentDE) {
+        sim = sims_rp[[as.character(percentDE)]]
+        sim.norm.ref = sims_rp.ref[[as.character(percentDE)]]
+        trueRef.idx = which(sim$differential == 0)
+        trueDif.idx = which(sim$differential == 1)
+        
+        NSCALE = min(length(trueDif.idx), length(trueRef.idx))
+        mclapply(seq(1,NSCALE, floor(NSCALE/n_data_points)), mc.cores = 1, FUN = function(n_diff) {
+            lapply(1:10, function(i) {
+                rand.dif = sample(trueDif.idx, size = n_diff)
+                rand.ref = sample(trueRef.idx, size = NSCALE - n_diff)
+                   
+                rand.subset = union(rand.ref, rand.dif)
+                raw = colSums(sim$counts[rand.subset,,drop= FALSE])
+                sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
+                scalingFactors = raw / geom.mean(raw)
+                
+                return(list('scalingFactors' = scalingFactors,
+                            'percentDE' = percentDE,
+                            'rand.subset' = rand.subset,
+                            'n_diffs_in_scale' = n_diff,
+                            'diffFraction' = n_diff/NSCALE,
+                            'diffVarTotal' = sum(var(sim$counts[rand.dif,])), # The total variance of the DE genes in the random set selected for scaling
+                            'cdev' =  cdev(sim.norm.i, sim.norm.ref)))
+            }) 
+        }) %>%
+        unlist(recursive = FALSE)
+    }) %>%
+    unlist(recursive = FALSE)
+```
+
+#### DE tests
+
+```{r, message=FALSE}
+rp_de.results = lapply(sims_rp.rand.norms, function(sim.norm) {
+    
+    sim = sims_rp[[as.character(sim.norm$percentDE)]]
+    de.test.limma(sim$counts,
+            group = sim$conditions$condition,
+            norm.factors = sim.norm$scalingFactors) %>%
+        limma::topTable(n = Inf, sort.by = 'none', adjust.method = 'BH')
+})
+```
+
+```{r}
+performance.df = lapply(1:length(sims_rp.rand.norms), function(i) {
+    
+    sim.norm = sims_rp.rand.norms[[i]]
+    sim = sims_rp[[as.character(sim.norm$percentDE)]]
+    de = rp_de.results[[i]]
+    deg.idx = which(de$adj.P.Val < 0.01)
+    
+    auc = auroc(1-de$adj.P.Val, !!sim$differential)
+    TP = length(intersect(which(sim$differential == 1), deg.idx))
+    FP = length(setdiff(deg.idx, which(sim$differential == 1)))
+    idx.diff = sim.norm$rand.subset[which(sim$differential[sim.norm$rand.subset] == 1)]
+    
+    data.frame('cdev' = sim.norm$cdev,
+               'percentDE' = sim.norm$percentDE,
+               'diffFraction' = sim.norm$diffFraction,
+               'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
+               'diffVarTotal' = sim.norm$diffVarTotal,
+               'AUC' = auc,
+               'TPR' = TP/length(which(sim$differential == 1)),
+               'FDR' = FP / length(deg.idx),
+               'FPR' = FP / length(which(sim$differential == 0))
+               )
+}) %>%
+    do.call(rbind, .)
+p2_cdev_vs_df.percentDE = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=cdev, color=percentDE, group=percentDE), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+# ggplot(performance.df) +
+#     geom_point(aes(x=diffFraction,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
+#     theme_bw(base_size = THEME_BASE_SIZE)
+
+p2_cdev_vs_auc.percentDE = ggplot(performance.df) +
+    geom_point(aes(x=cdev,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+print(p2_cdev_vs_df.percentDE)
+print(p2_cdev_vs_auc.percentDE)
+ggplot(performance.df) +
+    facet_wrap('percentDE') +
+    geom_point(aes(x=cdev,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+```
+
+```{r}
+ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=cdev, color=percentDE, group=percentDE), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+```
+```{r}
+ggplot(performance.df) +
+    geom_point(aes(x=diffVarTotal,y=cdev, color=percentDE, group=percentDE), alpha = 0.3)
+```
+
+## Combining plots for publication figure
+
+
+```{r,fig.width=8,fig.height=15}
+egg::ggarrange(pl_cdev_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),pl_cdev_vs_auc.ngene + theme(axis.title.x=element_blank()),
+               pl_cdev_vs_df.percentDE + theme(legend.position = 'none',axis.title.x=element_blank()),pl_cdev_vs_auc.percentDE  + theme(axis.title.x=element_blank()),
+               pl_cdev_vs_df.foldchange + theme(legend.position = 'none',axis.title.x=element_blank()),pl_cdev_vs_auc.foldchange + theme(axis.title.x=element_blank()),
+               p2_cdev_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),p2_cdev_vs_auc.ngene + theme(axis.title.x=element_blank()),
+               p2_cdev_vs_df.percentDE + theme(legend.position = 'none'),p2_cdev_vs_auc.percentDE,
+               ncol = 2)
+```
+
