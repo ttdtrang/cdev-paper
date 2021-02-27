@@ -1327,37 +1327,3 @@ ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
     geom_point(aes(x=mse_TrueRefs,y=cdev)) +
     ggtitle(data_prefix)
 ```
-
-```{r}
-dat.normed = get('xtro1m.normed', envir = data.container)
-group = dat.pheno$Clutch
-
-the_random_refs = xtro1m.5h.cdev_vs_mse[which((20 < xtro1m.5h.cdev_vs_mse$cdev) &
-                                              (xtro1m.5h.cdev_vs_mse$mse_TrueRefs < 0.5)),'rand.refs.idx'] %>%
-    strsplit(',') %>%
-    `[[`(1) %>%
-    as.integer()
-
-x_i = normalize.by.refs(dat.cnt, the_random_refs)
-the_mse = mean(logFC(x_i[dat.refs.idx,], groups = group, pseudocount = 1)^2)
-the_cdev = cdev(x_i,dat.normed)
-
-par(mfrow=c(1,3))
-plot.matrix(log2(   dat.cnt[c(the_random_refs,dat.refs.idx),]+1),main = 'Raw',asp=5/3)
-plot.matrix(log2(        x_i[c(the_random_refs,dat.refs.idx),]                   +1),main = 'RandRefs-normalized',asp=5/3)
-plot.matrix(log2(dat.normed[c(the_random_refs,dat.refs.idx),]+1),main = 'TrueRefs-normalized',asp=5/3)
-
-xtro1m.rand.pca = project.pca(t(x_i[dat.refs.idx,]), selected.pc = c(1:3)) %>%
-    cbind(dat.pheno[,c('Clutch', 'Time.hpf.')])
-
-xtro1m.true.pca = project.pca(t(dat.normed[dat.refs.idx,]), selected.pc = c(1:3)) %>%
-    cbind(dat.pheno[,c('Clutch', 'Time.hpf.')])
-
-
-plot.pca.combo(xtro1m.rand.pca, 'Clutch', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
-plot.pca.combo(xtro1m.true.pca, 'Clutch', title = 'TrueRefs-normalized\n')
-plot.pca.combo(xtro1m.rand.pca, 'Time.hpf.', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
-plot.pca.combo(xtro1m.true.pca, 'Time.hpf.', title = 'TrueRefs-normalized\n')
-```
-
-
