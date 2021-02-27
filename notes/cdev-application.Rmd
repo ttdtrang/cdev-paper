@@ -1,0 +1,380 @@
+---
+title: "Application of cdev to compare normalization methods"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+library(magrittr)
+library(ggplot2)
+library(parallel)
+library(Biobase)
+options(stringsAsFactors = FALSE)
+devtools::load_all('../')
+burd = colorRampPalette(colors = c("blue", "white", "red"))(n = 255)
+rdbu = colorRampPalette(colors = c("red", "white", "blue"))(n = 255)
+blues = colorRampPalette(colors = c('white', 'blue'))(n = 255)
+breakList = seq(-1,1,by = 0.01)
+
+```
+
+## Comparison on simulation
+
+```{r}
+norms.simulation = readRDS('../data/simulations_normalized.RDS')
+METHODS_ORDERED = colnames(norms.simulation[[1]]$cdevMatrix)
+```
+
+### Expression matrices
+
+Expression pattern of references
+
+```{r,fig.width=14,fig.height=4}
+par(mfrow=c(1,8))
+for (percentDE in names(norms.simulation)) {
+    x = norms.simulation[[as.character(percentDE)]] 
+    
+    if (is.null(x$refs.idx) | is.null(x$normResults)) next
+    par(mar=c(1,1,1,1))
+    layout(matrix(c(rep(1,8), c(2:9)), nrow=2, byrow = TRUE),
+           heights = c(1,8),
+           widths = rep(1,8)
+           )
+    # dev.off()
+    plot.new()
+    text(0.5, 0.5, sprintf("DE percentage: %s",percentDE))
+    for (processing in names(x$normResults)) {
+        plot.matrix(log2(x$normResults[[processing]][x$refs.idx,]+1), asp = 5/3, main = processing)
+    }
+}
+```
+Expression pattern of all genes
+
+```{r,fig.width=14,fig.height=4}
+# par(mfrow=c(1,8))
+for (percentDE in names(norms.simulation)) {
+    x = norms.simulation[[as.character(percentDE)]] 
+    diff.idx = setdiff(1:nrow(x$normResults[[1]]), x$refs.idx)
+    diff.idx.shuffle = sample(diff.idx,size =length(diff.idx), replace = FALSE)
+    if (is.null(x$refs.idx) | is.null(x$normResults)) next
+    par(mar=c(1,1,1,1))
+    layout(matrix(c(rep(1,8), c(2:9)), nrow=2, byrow = TRUE),
+           heights = c(1,8),
+           widths = rep(1,8)
+           )
+    # dev.off()
+    plot.new()
+    text(0.5, 0.5, sprintf("DE percentage: %s",percentDE))
+    for (processing in names(x$normResults)) {
+        plot.matrix(log2(x$normResults[[processing]][c(diff.idx.shuffle,x$refs.idx),]+1), asp = 5/3, main = processing)
+    }
+}
+```
+
+### cdev matrix
+
+```{r}
+breakList_cdev = seq(1,10,0.1)
+reds = colorRampPalette(c('white', 'red'))(n=length(breakList_cdev))
+for (percentDE in names(norms.simulation)) {
+    x = norms.simulation[[percentDE]]
+    pheatmap::pheatmap(x$cdevMatrix,
+                       cellwidth = 30, cellheight = 30,
+                       display_numbers = TRUE, cluster_rows = FALSE, cluster_cols = FALSE,
+                       main = percentDE, color = reds, breaks = breakList_cdev
+                       # filename = sprintf('sim-percentDE_%s-cdevMatrix.png')
+                       )
+}
+```
+
+### cdev by DE percentage
+
+```{r}
+percentDEs = as.numeric(names(norms.simulation))
+p_cdev = sapply(names(norms.simulation), function(percentDE) {
+    x = norms.simulation[[percentDE]]
+    x$cdevMatrix['Oracle',]
+}) %>%
+    reshape2::melt() %>%
+    set_names(c('Method', 'percentDE', 'cdev')) %>%
+    subset(.$Method != 'Oracle',TRUE) %>%
+    ggplot(aes(x=percentDE,y=cdev,color=factor(Method, levels = METHODS_ORDERED))) +
+    guides(color=guide_legend(title = 'Method')) +
+    geom_line() +
+    geom_point() +
+    ggtitle('Simulation with heterogeneous FC') +
+    theme_bw(base_size=13)
+
+```
+### DE performance
+
+```{r}
+sims_norms.de_results = lapply(names(norms.simulation), function(percentDE) {
+    x = norms.simulation[[as.character(percentDE)]]
+    x.cnt = x$normResults[['raw']]
+    
+    # Pick the true references with minimum counts > 0,
+    # reverse-engineer the scaling factors
+    an_eligible_ref = x$refs.idx[which(apply(x.cnt[x$refs.idx,], MARGIN = 1, min) > 0)][1]
+    lapply(names(x$normResults), function(processing) {
+        scalingFactors = x.cnt[an_eligible_ref,] / x$normResults[[processing]][an_eligible_ref,]
+        de.test.limma(x.cnt,
+                group = c(rep(1,20),rep(2,20)),
+                norm.factors = scalingFactors) %>%
+            limma::topTable(n = Inf, sort.by = 'none', adjust.method = 'BH')    
+    }) %>%
+        set_names(names(x$normResults))
+    
+}) %>%
+    set_names(names(norms.simulation))
+```
+
+```{r}
+sims_norms.de_performance =
+    lapply(names(norms.simulation), function(percentDE) {
+        x = norms.simulation[[percentDE]]
+        lapply(names(x$normResults), function(processing) {
+            y = x$normResults[[processing]]
+        
+            de = sims_norms.de_results[[percentDE]][[processing]]
+            deg.idx = which(de$adj.P.Val < 0.01)
+            true_deg.idx = setdiff(1:nrow(y), x$refs.idx)
+            is.diff = rep(TRUE, nrow(y))
+            is.diff[x$refs.idx] = FALSE
+            auc = auroc(1-de$adj.P.Val, is.diff)
+            TP = length(intersect(true_deg.idx, deg.idx))
+            FP = length(setdiff(deg.idx, true_deg.idx))
+          
+            data.frame('Method' = processing,
+                       'percentDE' = as.numeric(percentDE),
+                       'cdev.vs.oracle' = x$cdevMatrix[processing,'Oracle'],
+                       'AUC' = auc,
+                       'TPR' = TP/length(true_deg.idx),
+                       'FDR' = FP / length(deg.idx),
+                       'FPR' = FP / length(x$refs.idx)
+                       )
+        })
+    }) %>%
+        unlist(recursive = FALSE) %>%
+        do.call(rbind, .)
+
+p_auc = ggplot(sims_norms.de_performance,aes(x=percentDE,y=AUC,color=factor(Method,levels=METHODS_ORDERED))) +
+    geom_point() +
+    geom_line() +
+    xlim(c(0,1)) +
+    ylim(c(0,1)) +
+    guides(color=guide_legend(title = 'Method')) +
+    # ggtitle('Simulation with heterogeneous FC') +
+    theme_bw(base_size=13)
+
+p_tpr = ggplot(sims_norms.de_performance,aes(x=percentDE,y=TPR,color=factor(Method,levels=METHODS_ORDERED))) +
+    geom_point() +
+    geom_line() +
+    xlim(c(0,1)) +
+    ylim(c(0,1)) +
+    guides(color=guide_legend(title = 'Method')) +
+    # ggtitle('Simulation with heterogeneous FC') +
+    theme_bw(base_size=13)
+
+
+p_fdr = ggplot(sims_norms.de_performance,aes(x=percentDE,y=FDR,color=factor(Method,levels=METHODS_ORDERED))) +
+    geom_point() +
+    geom_line() +
+    xlim(c(0,1)) +
+    ylim(c(0,1)) +
+    guides(color=guide_legend(title = 'Method')) +
+    # ggtitle('Simulation with heterogeneous FC') +
+    theme_bw(base_size=13)
+
+p_fpr = ggplot(sims_norms.de_performance,aes(x=percentDE,y=FPR,color=factor(Method,levels=METHODS_ORDERED))) +
+    geom_point() +
+    geom_line() +
+    xlim(c(0,1)) +
+    ylim(c(0,1)) +
+    guides(color=guide_legend(title = 'Method')) +
+    # ggtitle('Simulation with heterogeneous FC') +
+    theme_bw(base_size=13)
+print(p_fdr)
+```
+
+
+Combining plots for publication
+
+```{r,fig.width=5,fig.height=10}
+egg::ggarrange(p_cdev + theme(axis.title.x = element_blank()),
+               p_fpr + theme(axis.title.x = element_blank()),
+               p_auc, ncol = 1)
+```
+
+### cdev vs AUC
+
+```{r}
+ggplot(sims_norms.de_performance) +
+    facet_wrap('percentDE') +
+    geom_point(aes(x=cdev.vs.oracle,y=AUC,color=factor(Method,levels=METHODS_ORDERED))) + 
+    guides(color=guide_legend(title = 'Method'))  +
+    theme_bw(base_size=13)
+
+ggplot(sims_norms.de_performance[sims_norms.de_performance$percentDE == 0.9,]) +
+    geom_point(aes(x=cdev.vs.oracle,y=AUC,color=factor(Method,levels=METHODS_ORDERED)),size=5) + 
+    guides(color=guide_legend(title = 'Method')) +
+    ggtitle('Simulation with heterogeneous FC, percentDE = 0.9') +
+    theme_bw(base_size=13) +
+    coord_fixed(ratio = 4) +
+    ylim(c(0,1)) +
+    xlab('cdev(X,A)')
+ggsave('comparison-sims-cdev_vs_AUC-percentDE0.9.png')
+```
+
+
+
+## Comparison on real data
+
+### Expression matrices
+
+```{r}
+env.norms = readRDS('../data/real_data_normalized.RDS')
+```
+
+
+```{r}
+load('../data/data_container.Rdata')
+DATASET_PREFIXES = c('rbm1', 'rbm2', 'rnor1', 'rnor2',
+                     'mpreg1a', 'mpreg1b', 'mpreg2a', 'mpreg2b',
+                     'dmelAC', 'dmelAV','sarcoma', 'lymphoma',
+                     'yfv', 'xtro1m', 'xtro2')
+```
+
+Expression pattern of ERCC spike-ins
+
+```{r,fig.width=14,fig.height=4}
+# par(mfrow=c(1,7))
+for (prefix in DATASET_PREFIXES) {
+    REFS.idx = get0(paste0(prefix,'.refs.idx'), envir = data.container)
+    x.normResults = get0(paste0(prefix,'.normResults'), envir = env.norms)
+    if (is.null(REFS.idx) | is.null(x.normResults)) next
+    png(filename = sprintf("%s_matrices.png",prefix),width =1400,height = 400)
+    par(mar=c(1,1,1,1))
+    layout(matrix(c(rep(1,8), c(2:9)), nrow=2, byrow = TRUE),
+           heights = c(1,8),
+           widths = rep(1,8)
+           )
+    plot.new()
+    text(0.5, 0.5, prefix)
+    for (processing in names(x.normResults)) {
+        plot.matrix(log2(x.normResults[[processing]][REFS.idx,]+1), asp = 5/3, main = processing)
+    }
+    dev.off()
+}
+```
+
+Expression pattern of ERCC spike-ins and random set of internal genes
+
+```{r,fig.width=14,fig.height=4}
+# par(mfrow=c(1,7))
+for (prefix in DATASET_PREFIXES) {
+    REFS.idx = get0(paste0(prefix,'.refs.idx'), envir = data.container)
+    x.normResults = get0(paste0(prefix,'.normResults'), envir = env.norms)
+    rand.idx = sample(setdiff(1:nrow(x.normResults[[1]]), REFS.idx), size = length(REFS.idx))
+    if (is.null(REFS.idx) | is.null(x.normResults)) next
+    par(mar=c(1,1,1,1))
+    layout(matrix(c(rep(1,8), c(2:9)), nrow=2, byrow = TRUE),
+           heights = c(1,8),
+           widths = rep(1,8)
+           )
+    # dev.off()
+    plot.new()
+    text(0.5, 0.5, prefix)
+    for (processing in names(x.normResults)) {
+        plot.matrix(log2(x.normResults[[processing]][c(rand.idx,REFS.idx),]+1), asp = 5/3, main = processing)
+    }
+}
+```
+
+### PCA
+
+```{r,fig.width=10,fig.height=7}
+sample_grouping = list(
+    'rbm1' = 'Organ',
+    'rbm2' = 'Organ',
+    'rnor1' = 'Chemical',
+    'rnor2' = 'Chemical',
+    'mpreg1a' = 'BrainRegion',
+    'mpreg1b' = 'Stage',
+    'mpreg2a' = 'BrainRegion',
+    'mpreg2b' = 'Stage',
+    'dmelAC' = c('Environment', 'FlowcellId'),
+    'dmelAV' = 'Environment',
+    'sarcoma' = c('Tissue', 'Sex', 'Metastasis'),
+    'lymphoma' = c('CellLine', 'Treatment'),
+    'yfv' = 'Infection'
+    # 'xtro1m' = 'Time.hpf.', # Time-series data need to be visualized differently
+    # 'xtro2' = 'Time.hpf.',
+   
+)
+for (data_prefix in names(sample_grouping)) {
+    selectedPheno = sample_grouping[[data_prefix]]
+    x.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+    x.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+    x.normed  = get(paste0(data_prefix, '.normed'), envir = data.container)
+    x.normResults = get(paste0(data_prefix, '.normResults'), envir = env.norms)
+    x.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+    x.pca.df = list(
+        project.pca(t(x.cnt), selected.pc = c(1,2)) %>%
+             cbind(x.pheno[,selectedPheno, drop=FALSE], 'Processing' = 'raw', 'Subset' = 'all'),
+        project.pca(t(x.normed), selected.pc = c(1,2)) %>%
+             cbind(x.pheno[,selectedPheno, drop=FALSE], 'Processing' = 'normalized', 'Subset' = 'all'),
+        project.pca(t(x.normResults[['PoissonSeq']]), selected.pc = c(1,2)) %>%
+             cbind(x.pheno[,selectedPheno, drop=FALSE], 'Processing' = 'PoissonSeq', 'Subset' = 'all'),
+        project.pca(t(x.cnt[x.refs.idx,]), selected.pc = c(1,2)) %>%
+             cbind(x.pheno[,selectedPheno, drop=FALSE], 'Processing' = 'raw', 'Subset' = 'ERCC spike-ins'),
+        project.pca(t(x.normed[x.refs.idx,]), selected.pc = c(1,2)) %>%
+             cbind(x.pheno[,selectedPheno, drop=FALSE], 'Processing' = 'normalized', 'Subset' = 'ERCC spike-ins'),
+        project.pca(t(x.normResults[['PoissonSeq']][x.refs.idx,]), selected.pc = c(1,2)) %>%
+             cbind(x.pheno[,selectedPheno, drop=FALSE], 'Processing' = 'PoissonSeq', 'Subset' = 'ERCC spike-ins')
+    ) %>%
+        do.call(rbind, .)
+    
+for (field in selectedPheno) {
+        p = ggplot(x.pca.df) +
+            facet_grid(Subset ~ factor(Processing,levels=c('raw', 'normalized')) ) +
+            geom_point(aes_string(x='PC1',y='PC2',color=field)) +
+            ggtitle(data_prefix)
+        print(p)
+        ggsave(filename = sprintf('pca-raw_vs_norm-%s-%s.png', data_prefix, field), plot = p)
+    }
+}
+```
+
+### Summarized results
+
+```{r}
+breakList_cdev = seq(1,50,0.2)
+reds = colorRampPalette(c('white', 'red'))(n=length(breakList_cdev))
+for (prefix in DATASET_PREFIXES) {
+    x.cdevMatrix = get(paste0(prefix, '.cdevMatrix'), envir = env.norms)
+    pheatmap::pheatmap(x.cdevMatrix,
+                       cellwidth = 30, cellheight = 30, display_numbers = TRUE,
+                       main = prefix,cluster_rows = FALSE, cluster_cols = FALSE, color = reds, breaks = breakList_cdev,
+                       filename = paste0(prefix, '_cdevMatrix.png'))
+}
+```
+
+
+```{r}
+time_points = unique(xtro1m.pheno$Time.hpf.)
+xtro1m.cnt.pca = project.pca(t(xtro1m.cnt), selected.pc = c(1,2,3)) %>%
+    cbind(xtro1m.pheno[,c('Time.hpf.'), drop=FALSE])
+xtro1m.normed.pca = project.pca(t(xtro1m.normed), selected.pc = c(1,2,3)) %>%
+    cbind(xtro1m.pheno[,c('Time.hpf.'), drop=FALSE])
+ggplot(xtro1m.cnt.pca) +
+    geom_point(aes(x=PC1,y=PC2,color=Time.hpf.),size=6, alpha=0.4) +
+    scale_color_gradientn(colours = rainbow(length(time_points))) +
+    geom_text(aes(x=PC1,y=PC2,label=Time.hpf.),size=3) +
+    theme(legend.position = "none")
+
+ggplot(xtro1m.normed.pca) +
+    geom_point(aes(x=PC1,y=PC2,color=Time.hpf.),size=6, alpha=0.4) +
+    scale_color_gradientn(colours = rainbow(length(time_points))) +
+    geom_text(aes(x=PC1,y=PC2,label=Time.hpf.),size=3) +
+    theme(legend.position = "none")
+```
