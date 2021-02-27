@@ -1,0 +1,427 @@
+---
+title: "cdev range in real data sets"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+library(magrittr)
+library(ggplot2)
+library(parallel)
+library(Biobase)
+options(stringsAsFactors = FALSE)
+devtools::load_all('../')
+burd = colorRampPalette(colors = c("blue", "white", "red"))(n = 255)
+rdbu = colorRampPalette(colors = c("blue", "white", "red"))(n = 255)
+blues = colorRampPalette(colors = c('white', 'blue'))(n = 255)
+breakList = seq(-1,1,by = 0.01)
+
+is.good.refs = function(cnt_matrix, min.count = 10) {
+    and(grepl('ERCC-', rownames(cnt_matrix)), apply(cnt_matrix, 1, min) >= min.count)
+}
+```
+
+
+## Preparing expression matrices
+
+### Rat Bodymap, re-processed
+
+```{r}
+data(rbm.rnaseq.gene.star_rsem, package='data.rnaseq.RnorBodymap')
+assign('rbm.rnaseq.gene', rbm.rnaseq.gene.star_rsem)
+rm(rbm.rnaseq.gene.star_rsem)
+rbm.cnt = rbm.rnaseq.gene@assayData$expected_count 
+rbm.pheno = rbm.rnaseq.gene@phenoData@data
+for (f in c('starAlignment.n_input_reads', 'starAlignment.n_uniquely_mapped_reads')) {
+    rbm.pheno[[f]] = as.numeric(rbm.pheno[[f]])
+}
+
+rbm1.pheno = rbm.pheno[rbm.pheno$ERCC_Mix == 'M1',]
+rbm1.cnt = rbm.cnt[,rbm.pheno$ERCC_Mix == 'M1']
+
+rbm2.pheno = rbm.pheno[rbm.pheno$ERCC_Mix == 'M2',]
+rbm2.cnt = rbm.cnt[,rbm.pheno$ERCC_Mix == 'M2']
+
+```
+
+```{r}
+rbm1.refs.idx = which(is.good.refs(rbm1.cnt))
+rbm1.normed = normalize.by.refs(rbm1.cnt, rbm1.refs.idx)
+rbm1.cnt[rbm1.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+rbm2.refs.idx = which(is.good.refs(rbm2.cnt))
+rbm2.normed = normalize.by.refs(rbm2.cnt, rbm2.refs.idx)
+rbm2.cnt[rbm2.refs.idx,] %>%
+    t() %>%
+    plot.pcp(line.color = as.numeric(rbm.pheno$RNA_RIN))
+```
+
+The outlier samples:
+
+```{r}
+rbm2.pheno[rbm2.cnt['ERCC-00116',] < 100,c('BiosampleId','Sex','Organ', 'Age_Week','RNA_RIN')]
+rbm1.pheno[rbm1.cnt['ERCC-00043',] < 100,c('BiosampleId','Sex','Organ', 'Age_Week','RNA_RIN')]
+```
+
+Correlation between RNA integrity, library concentration, and input reads
+
+```{r}
+is.SAMN02642774 = rbm.pheno$BiosampleId == 'SAMN02642774'
+is.SAMN02642663 = rbm.pheno$BiosampleId == 'SAMN02642663'
+ggplot(rbm.pheno) + geom_point(aes(x=RNA_RIN,y=starAlignment.n_input_reads,color=is.SAMN02642774), alpha = 0.5)
+ggplot(rbm.pheno) + geom_point(aes(x=Library_Con_ng.ul,y=starAlignment.n_input_reads,color=is.SAMN02642774), alpha = 0.5)
+ggplot(rbm.pheno) + geom_point(aes(x=Library_Con_ng.ul,y=starAlignment.n_input_reads,color=is.SAMN02642774), alpha = 0.5)
+
+ggplot(rbm.pheno) + geom_point(aes(x=RNA_A260.A280_Ratio,y=starAlignment.n_uniquely_mapped_reads,color=is.SAMN02642663), alpha = 0.5)
+ggplot(rbm.pheno) + geom_point(aes(x=RNA_RIN,y=starAlignment.n_uniquely_mapped_reads,color=is.SAMN02642663), alpha = 0.5)
+ggplot(rbm.pheno) + geom_point(aes(x=Library_Con_ng.ul,y=starAlignment.n_uniquely_mapped_reads,color=is.SAMN02642663), alpha = 0.5)
+```
+
+
+```{r}
+ercc_fraction = colSums(rbm1.cnt[rbm1.refs.idx,])
+plot(rbm1.pheno$RNA_RIN, ercc_fraction)
+plot(rbm1.pheno$starAlignment.n_input_reads, ercc_fraction)
+```
+
+```{r}
+rbm1.cnt = rbm1.cnt[,(colnames(rbm1.cnt) != 'SAMN02642663')]
+rbm1.pheno = rbm1.pheno[!(rbm1.pheno$BiosampleId == 'SAMN02642663'),]
+
+rbm1.refs.idx = which(is.good.refs(rbm1.cnt, min.count = 100))
+rbm1.normed = normalize.by.refs(rbm1.cnt, rbm1.refs.idx)
+rbm1.cnt[rbm1.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+
+rbm2.cnt = rbm2.cnt[,(colnames(rbm2.cnt) != 'SAMN02642774')]
+rbm2.pheno = rbm2.pheno[!(rbm2.pheno$BiosampleId == 'SAMN02642774'),]
+rbm2.refs.idx = which(is.good.refs(rbm2.cnt,min.count = 100))
+rbm2.normed = normalize.by.refs(rbm2.cnt, rbm2.refs.idx)
+rbm2.cnt[rbm2.refs.idx,] %>%
+    t() %>%
+    plot.pcp(line.color = as.numeric(rbm2.pheno$RNA_RIN))
+```
+
+### SEQC toxicogenomics (Rat liver)
+
+```{r}
+data(rnor.rnaseq.gene.star_rsem, package='data.rnaseq.Rnor')
+assign('rnor.rnaseq.gene', rnor.rnaseq.gene.star_rsem)
+rm(rnor.rnaseq.gene.star_rsem)
+rnor1.pheno = rnor.rnaseq.gene@phenoData@data[rnor.rnaseq.gene@phenoData@data$ERCCSpikeInMix == 'Mix1',]
+rnor1.cnt = rnor.rnaseq.gene@assayData$exprs[,rnor.rnaseq.gene@phenoData@data$ERCCSpikeInMix == 'Mix1']
+rnor1.refs.idx = and(grepl('ERCC-', rnor.rnaseq.gene@featureData@data$ID),(apply(rnor1.cnt, 1, min) >= 10 )) %>%
+    which()
+rnor1.normed = normalize.by.refs(rnor1.cnt, rnor1.refs.idx)
+rnor1.cnt[rnor1.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+
+rnor2.pheno = rnor.rnaseq.gene@phenoData@data[rnor.rnaseq.gene@phenoData@data$ERCCSpikeInMix == 'Mix2',]
+rnor2.cnt = rnor.rnaseq.gene@assayData$exprs[,rnor.rnaseq.gene@phenoData@data$ERCCSpikeInMix == 'Mix2']
+rnor2.refs.idx = and(grepl('ERCC-', rnor.rnaseq.gene@featureData@data$ID),(apply(rnor1.cnt, 1, min) >= 10 )) %>%
+    which()
+rnor2.normed = normalize.by.refs(rnor2.cnt, rnor2.refs.idx)
+rnor2.cnt[rnor2.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+```
+
+### _Drosophila melanogaster_ 
+
+```{r}
+data(dmel.rnaseq.gene.star_rsem, package='data.rnaseq.Dmel')
+dmel.cnt = dmel.rnaseq.gene.star_rsem@assayData$expected_count
+dmel.pheno = dmel.rnaseq.gene.star_rsem@phenoData@data
+
+for (f in colnames(dmel.pheno)[grepl('^starAlignment\\.n_', colnames(dmel.pheno))]) {
+    dmel.pheno[[f]] = as.numeric(dmel.pheno[[f]])
+}
+```
+
+
+```{r}
+dmelA.pheno = dmel.pheno[dmel.pheno$ERCC_Pool == '78A',]
+dmelA.cnt = dmel.cnt[,dmel.pheno$ERCC_Pool == '78A']
+dmelA.refs.idx = which(is.good.refs(dmelA.cnt, min.count = 50))
+
+dmelA.cnt[dmelA.refs.idx,] %>%
+    t() %>%
+    plot.pcp(line.color = dmelA.pheno$RNA_Prep_Method, alpha = 0.2) +
+    guides(color=guide_legend(title='RNA processing method'))
+```
+
+One of the criteria by Lin et al. (2016) to eliminate poor quality samples is the number of uniquely mapped reads below 2.5 million. We want to make sure there is no such low-coverage sample in the set.
+
+```{r}
+length(which(colSums(dmelA.cnt) < 2.5e6))
+```
+
+Removing low quality samples
+
+```{r}
+is.lowCoverage = (colSums(dmelA.cnt) < 2.5e6)
+dmelA.cnt = dmelA.cnt[,!is.lowCoverage]
+dmelA.pheno = dmelA.pheno[!is.lowCoverage,]
+dmelA.refs.idx = which(is.good.refs(dmelA.cnt, min.count = 50))
+dmelA.normed = normalize.by.refs(dmelA.cnt, dmelA.refs.idx)
+dmelA.cnt[dmelA.refs.idx,] %>%
+    t() %>%
+    plot.pcp(line.color = dmelA.pheno$RNA_Prep_Method, alpha = 0.2) +
+    guides(color=guide_legend(title='RNA processing method'))
+```
+
+```{r}
+prep_subset = which(dmelA.pheno$RNA_Prep_Method == "C")
+dmelAC.cnt = dmelA.cnt[,prep_subset]
+dmelAC.pheno = dmelA.pheno[prep_subset,]
+dmelAC.refs.idx = which(is.good.refs(dmelAC.cnt, min.count = 50))
+dmelAC.normed = normalize.by.refs(dmelAC.cnt, dmelAC.refs.idx)
+dmelAC.cnt[dmelAC.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+
+prep_subset = which(dmelA.pheno$RNA_Prep_Method == "V")
+dmelAV.cnt = dmelA.cnt[,prep_subset]
+dmelAV.pheno = dmelA.pheno[prep_subset,]
+dmelAV.refs.idx = which(is.good.refs(dmelAV.cnt, min.count = 50))
+dmelAV.normed = normalize.by.refs(dmelAV.cnt, dmelAV.refs.idx)
+dmelAV.cnt[dmelAV.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+```
+
+Samples spiked with 78B have very little to zero spike-ins RNA being detected.
+
+```{r}
+dmelB.pheno = dmel.pheno[dmel.pheno$ERCC_Pool == '78B',]
+dmelB.cnt = dmel.cnt[,dmel.pheno$ERCC_Pool == '78B']
+dmelB.refs.idx = which(is.good.refs(dmelB.cnt, min.count = 1))
+
+plot.matrix(log2(dmelB.cnt[grepl('^ERCC-',rownames(dmelB.cnt)),]+1), col = burd, asp = 5/3)
+dmelB.cnt[dmelB.refs.idx,] %>%
+    t() %>%
+    plot.pcp(line.color = dmelB.pheno$RNA_Prep_Method, alpha = 0.2) +
+    guides(color=guide_legend(title='RNA processing method'))
+```
+
+The number of low-quality samples
+
+```{r}
+length(which(colSums(dmelB.cnt) < 2.5e6))
+```
+
+
+### Yellow-fever infected cells
+
+```{r}
+data('yfv.rnaseq.gene', package = 'data.rnaseq.YFV')
+yfv.cnt = get(envir = yfv.rnaseq.gene@assayData, x = 'exprs')
+yfv.pheno = yfv.rnaseq.gene@phenoData@data
+numeric_attrs = paste0('starAlignment.', c('n_input_reads', 'avg_input_length', 'n_uniquely_mapped_reads', 'avg_mapped_length'))
+for (attr in numeric_attrs) {
+    yfv.pheno[[attr]] = as.numeric(yfv.pheno[[attr]])
+}
+yfv.refs.idx = and(grepl('ERCC-', rownames(yfv.cnt)),(apply(yfv.cnt, 1, min) >= 100 )) %>%
+    which()
+yfv.normed = normalize.by.refs(yfv.cnt, yfv.refs.idx)
+yfv.cnt[yfv.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+```
+
+### B-cell lymphoma
+
+```{r}
+data(lymphoma.rnaseq.gene.star_rsem2, package='data.rnaseq.lymphoma')
+lymphoma.cnt = lymphoma.rnaseq.gene.star_rsem2@assayData$expected_count
+lymphoma.pheno = lymphoma.rnaseq.gene.star_rsem2@phenoData@data
+lymphoma.refs.idx = and(grepl('ERCC-', lymphoma.rnaseq.gene.star_rsem2@featureData@data$ID),is.good.refs(lymphoma.cnt, min.count = 10)) %>%
+    which()
+lymphoma.normed = normalize.by.refs(lymphoma.cnt, lymphoma.refs.idx)
+lymphoma.cnt[lymphoma.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+
+# Remove the outlier sample: SAMN09466901
+outlier_samples.idx = which(lymphoma.pheno$BiosampleId %in% c('SAMN09466901'))
+lymphoma.cnt = lymphoma.cnt[,-outlier_samples.idx]
+lymphoma.normed = lymphoma.normed[,-outlier_samples.idx]
+lymphoma.pheno = lymphoma.pheno[-outlier_samples.idx,]
+```
+```{r}
+lymphoma.cnt['ERCC-00145',]
+```
+
+### Sarcoma
+
+```{r}
+data(sarcoma.rnaseq.gene.star_rsem, package='data.rnaseq.sarcoma')
+nospike.samples = sarcoma.rnaseq.gene.star_rsem@assayData$expected_count[grepl('^ERCC-', sarcoma.rnaseq.gene.star_rsem@featureData@data$ID),] %>%
+    apply(2, max) %>%
+    `<`(10) %>%
+    which()
+sarcoma.cnt = sarcoma.rnaseq.gene.star_rsem@assayData$expected_count[,-nospike.samples]
+sarcoma.pheno = sarcoma.rnaseq.gene.star_rsem@phenoData@data[-nospike.samples,]
+sarcoma.pheno$Time = as.numeric(sarcoma.pheno$Time) # casting to appropriate data types
+# str(sarcoma.cnt)
+sarcoma.refs.idx = which(is.good.refs(sarcoma.cnt))
+sarcoma.normed = normalize.by.refs(sarcoma.cnt, sarcoma.refs.idx)
+sarcoma.cnt[sarcoma.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+sarcoma.cnt[which(is.good.refs(sarcoma.cnt, min.count = 100)),] %>%
+    t() %>%
+    plot.pcp()
+
+```
+
+### Mouse brain in pregnancy and post-partum
+
+```{r}
+data('mpreg.rnaseq.gene', package = 'data.rnaseq.MmusPreg')
+mpreg.cnt = get(envir = mpreg.rnaseq.gene@assayData, x = 'exprs')
+mpreg.pheno = mpreg.rnaseq.gene@phenoData@data
+mpreg.pheno$StageGroup = mpreg.pheno$Stage
+mpreg.pheno[grepl('^PP', mpreg.pheno$Stage), 'StageGroup'] = 'Postpartum'
+mpreg.pheno[grepl('^PC', mpreg.pheno$Stage), 'StageGroup'] = 'Postconception'
+
+mpreg1a.filter = mpreg.pheno$StageGroup == 'Postpartum' & mpreg.pheno$ERCCDilution == 0.1
+mpreg1b.filter = mpreg.pheno$StageGroup == 'Postpartum' & mpreg.pheno$ERCCDilution == 0.01
+mpreg2a.filter = mpreg.pheno$StageGroup != 'Postpartum' & mpreg.pheno$ERCCDilution == 0.1
+mpreg2b.filter = mpreg.pheno$StageGroup != 'Postpartum' & mpreg.pheno$ERCCDilution == 0.01
+
+for (filtr in c('1a', '1b', '2a', '2b')) {
+    the_filter = get(sprintf('mpreg%s.filter', filtr))
+    the_cnt = mpreg.cnt[, the_filter]
+    the_refs_idx = which(is.good.refs(the_cnt, min.count = 100))
+    assign(sprintf('mpreg%s.cnt', filtr), value = the_cnt)
+    assign(sprintf('mpreg%s.pheno', filtr), value = mpreg.pheno[the_filter,])
+    assign(sprintf('mpreg%s.refs.idx', filtr), value = the_refs_idx)
+    assign(sprintf('mpreg%s.normed', filtr), value = normalize.by.refs(the_cnt, the_refs_idx))
+
+}
+
+# mpreg1.cnt = mpreg.cnt[,mpreg.pheno$StageGroup == 'Postpartum']
+# mpreg1.pheno = mpreg.pheno[mpreg.pheno$StageGroup == 'Postpartum',]
+# mpreg1.refs.idx = which(is.good.refs(mpreg1.cnt))
+# mpreg1.normed = normalize.by.refs(mpreg1.cnt, mpreg1.refs.idx)
+mpreg1a.cnt[mpreg1a.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+# 
+# mpreg2.cnt = mpreg.cnt[,mpreg.pheno$StageGroup != 'Postpartum']
+# mpreg2.pheno = mpreg.pheno[mpreg.pheno$StageGroup != 'Postpartum',]
+# mpreg2.refs.idx = which(is.good.refs(mpreg2.cnt))
+# mpreg2.normed = normalize.by.refs(mpreg2.cnt, mpreg2.refs.idx)
+mpreg2a.cnt[mpreg2a.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+```
+
+### _X. tropicalis_ development
+
+```{r}
+data(xtro.rnaseq.gene, package='data.rnaseq.XtroDev')
+xtro.pheno = xtro.rnaseq.gene@phenoData@data
+xtro.cnt = xtro.rnaseq.gene@assayData$expected_count
+
+# Split the data set by behavior of ERCC spike-ins
+xtro1.cnt = xtro.cnt[,xtro.pheno$EnrichmentProtocol == 'polyA']
+xtro1.pheno = xtro.pheno[xtro.pheno$EnrichmentProtocol == 'polyA',]
+xtro1.refs.idx = which(is.good.refs(xtro1.cnt, min.count = 100))
+xtro1.normed = normalize.by.refs(xtro1.cnt, xtro1.refs.idx)
+xtro1.cnt[xtro1.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+
+xtro2.cnt = xtro.cnt[,xtro.pheno$EnrichmentProtocol == 'RiboZero']
+xtro2.pheno = xtro.pheno[xtro.pheno$EnrichmentProtocol == 'RiboZero',]
+xtro2.refs.idx = which(is.good.refs(xtro2.cnt, min.count = 100))
+xtro2.normed = normalize.by.refs(xtro2.cnt, xtro2.refs.idx)
+xtro2.cnt[xtro2.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+```
+
+```{r}
+which(xtro1.cnt['ERCC-00003',] < 500)
+which(xtro1.cnt['ERCC-00022',] > 1000)
+```
+
+```{r}
+which(xtro2.cnt['ERCC-00025',] > 1000)
+```
+A subset of ERCC spike-ins with distinct expression pattern in `xtro1` is excluded in the ground-truth reference, to create `xtro1m` data set.
+
+```{r}
+ercc.xtro1.outliers = c('ERCC-00003', 'ERCC-00043', 'ERCC-00060', 'ERCC-00062')
+is.outliers = rownames(xtro1.cnt) %in% ercc.xtro1.outliers
+xtro1m.refs.idx = which(is.good.refs(xtro1.cnt, min.count = 100) & (!is.outliers))
+xtro1m.cnt = xtro1.cnt
+xtro1m.pheno = xtro1.pheno
+xtro1m.normed = normalize.by.refs(xtro1m.cnt, xtro1m.refs.idx)
+xtro1m.cnt[xtro1m.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+
+```
+Split the data set by Clutch (slightly different spike-in concentration) and enrichment protocol
+    * Clutch A: 12/1045, then 1 µl per embryo, processed by either polyA enrichment or RiboZero depletion
+    * Clutch B: 8/836, then 1 µl per embryo, processed by polyA enrichment
+
+```{r}
+xtroAp.cnt = xtro.cnt[,xtro.pheno$Clutch == 'A' & xtro.pheno$EnrichmentProtocol == 'polyA']
+xtroAp.pheno = xtro.pheno[xtro.pheno$Clutch == 'A' & xtro.pheno$EnrichmentProtocol == 'polyA',]
+xtroAp.refs.idx = which(is.good.refs(xtroAp.cnt, min.count = 100))
+xtroAp.normed = normalize.by.refs(xtroAp.cnt, xtroAp.refs.idx)
+xtroAp.cnt[xtroAp.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+
+xtroAr.cnt = xtro.cnt[,xtro.pheno$Clutch == 'A' & xtro.pheno$EnrichmentProtocol == 'RiboZero']
+xtroAr.pheno = xtro.pheno[xtro.pheno$Clutch == 'A' & xtro.pheno$EnrichmentProtocol == 'RiboZero',]
+xtroAr.refs.idx = which(is.good.refs(xtroAr.cnt, min.count = 100))
+xtroAr.normed = normalize.by.refs(xtroAr.cnt, xtroAr.refs.idx)
+xtroAr.cnt[xtroAr.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+
+xtroB.cnt = xtro.cnt[,xtro.pheno$Clutch == 'B']
+xtroB.pheno = xtro.pheno[xtro.pheno$Clutch == 'B',]
+xtroB.refs.idx = which(is.good.refs(xtroB.cnt, min.count = 100))
+xtroB.normed = normalize.by.refs(xtroB.cnt, xtroB.refs.idx)
+xtroB.cnt[xtroB.refs.idx,] %>%
+    t() %>%
+    plot.pcp()
+```
+### Summary
+
+```{r}
+DATASET_PREFIXES = c('rbm1', 'rbm2', 'rnor1', 'rnor2',
+                     'dmelAC', 'dmelAV',
+                     'sarcoma', 'lymphoma', 'yfv',
+                     'mpreg1a', 'mpreg1b', 'mpreg2a', 'mpreg2b',
+                     'xtro1m', 'xtro2')
+for (data_prefix in DATASET_PREFIXES) {
+    str(get(paste0(data_prefix, '.cnt')))
+    str(get(paste0(data_prefix, '.normed')))
+    # str(get(paste0(data_prefix, '.refs.idx')))
+}
+```
+
+### Write data sets
+
+```{r,eval=FALSE}
+data.container = new.env()
+assign('DATASET_PREFIXES', DATASET_PREFIXES, envir = data.container)
+for (data_prefix in DATASET_PREFIXES) {
+    assign(paste0(data_prefix, '.cnt'), get0(paste0(data_prefix, '.cnt')), envir = data.container)
+    assign(paste0(data_prefix, '.normed'), get0(paste0(data_prefix, '.normed')), envir = data.container)
+    assign(paste0(data_prefix, '.pheno'), get0(paste0(data_prefix, '.pheno')), envir = data.container)
+    assign(paste0(data_prefix, '.refs.idx'), get0(paste0(data_prefix, '.refs.idx')), envir = data.container)
+}
+save(data.container, file = '../data_container.Rdata')
+```
+

@@ -1,4 +1,4 @@
-Package: cdev-paper
+Package: cdev.paper
 Title: cdev: a ground-truth based measure to evaluate RNA-seq normalization methods 
 Version: 0.0.0.9000
 Authors@R: person("Trang", "Tran", email = "ttdtrang@gmail.com", role = c("aut", "cre"))
