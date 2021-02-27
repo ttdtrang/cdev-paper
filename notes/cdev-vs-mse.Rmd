@@ -1,0 +1,1363 @@
+---
+title: "cdev vs MSE on real data sets"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+library(magrittr)
+library(ggplot2)
+library(parallel)
+library(Biobase)
+options(stringsAsFactors = FALSE)
+devtools::load_all('../')
+burd = colorRampPalette(colors = c("blue", "white", "red"))(n = 255)
+rdbu = colorRampPalette(colors = c("red", "white", "blue"))(n = 255)
+blues = colorRampPalette(colors = c('white', 'blue'))(n = 255)
+breakList = seq(-1,1,by = 0.01)
+
+is.good.refs = function(cnt_matrix, min.count = 10) {
+    and(grepl('ERCC-', rownames(cnt_matrix)), apply(cnt_matrix, 1, min) >= min.count)
+}
+
+mse.logFC.refs <- function(x, groups, refs.idx) {
+    mean(logFC(x[refs.idx,],groups, log.base = 2, pseudocount = 1)^2)
+}
+
+#' x should be a data frame with columns PC1, PC2, ... up to the number of PCs to be appeared in the boxplots
+plot.pca.combo <- function(x, grouping, title = '', base_size = 11) {
+    the_scatter = ggplot(x) + geom_point(aes_string(x='PC1',y='PC2',color=grouping)) +
+        ggtitle(title) +
+        theme_bw(base_size=base_size) +
+        theme(legend.position = 'left')
+    mm = reshape2::melt(x,id.vars = names(x)[!grepl('^PC', names(x))])
+    bplots = ggplot(mm) +
+        facet_grid(variable ~ .) +
+        geom_boxplot(aes_string(x=grouping,y='value',color=grouping)) +
+        ggpubr::stat_compare_means(aes_string(x=grouping,y='value'),
+                                   method = 'wilcox.test',
+                                   size = 2,
+                                   label.y.npc = 0.9) +
+        theme_bw(base_size = base_size) +
+        theme(legend.position = 'none')
+    p = gridExtra::grid.arrange(the_scatter, bplots, ncol = 4,
+                            layout_matrix = t(c(1,1,1,2)))
+    return(p)
+}
+```
+
+## Simulation with heterogenous fold-change
+
+```{r}
+NGENES = 5000
+NSAMPLES = 30
+NREFS = 2000
+REPEATS = 1:30
+
+k = 1 - (NREFS  / NGENES)
+sims_c <- 
+    lapply(REPEATS, function(i) {
+        simulate.counts.varyingfc(ngenes = NGENES, nlibs1 = NSAMPLES %/% 2, nlibs2= NSAMPLES - (NSAMPLES %/% 2), percentDE = k)
+    }) %>%
+    set_names(REPEATS)
+    
+sims_c.ref <-
+    lapply(REPEATS, function(i) {
+        # refs <- which(sim$differential == 0)
+        # difs <- which(sim$differential == 1)
+        # sim.cnt = sim$counts
+        # sim.normed = normalize.by.refs(sim$counts, refs)
+        sim = sims_c[[i]]
+        normalize.by.refs(sim$counts, which(sim$differential == 0))
+    }) %>%
+    set_names(REPEATS)
+```
+
+Normalize by a mix of true reference and differential genes
+
+```{r}
+sims_c.rand.norms = 
+    lapply(REPEATS, function(i) {
+        sim = sims_c[[i]]
+        sim.normed = sims_c.ref[[i]]
+        
+        lapply(c(0:20)/20, function(k) {
+            trueRef.idx = which(sim$differential == 0)
+            trueDif.idx = which(sim$differential == 1)
+            rand.ref = sample(trueRef.idx, size = floor(k*length(trueRef.idx)))
+            rand.dif = sample(trueDif.idx, size = min(length(trueDif.idx), NREFS - length(rand.ref)))
+            rand.subset = union(rand.ref, rand.dif)
+            x.normed = normalize.by.refs(sim$counts, ref.idx = rand.subset)
+            raw = apply(sim$counts[rand.subset,], 2, sum)
+            scalingFactors = raw / gbnorm:::geom.mean(raw)
+            cdev = gbnorm::cdev(x.normed, sim.normed)
+            # MSE of the set being used to scale
+            mse_scalingRef = mean((logFC(x.normed[rand.subset,], sim$conditions$condition, log.base = 2, pseudocount = 1) - log2(sim$fc[rand.subset]))^2)
+            # MSE of the true reference set
+            mse_ref = mean((logFC(x.normed[sim$differential==0,], sim$conditions$condition, log.base = 2, pseudocount = 1) - log2(sim$fc[sim$differential == 0]))^2)
+            mse_all = mean((logFC(x.normed, sim$conditions$condition, log.base = 2, pseudocount = 1) - log2(sim$fc))^2)
+            return(list('scalingFactors' = scalingFactors,
+                        'rand.subset' = rand.subset,
+                        'refFraction' = k,
+                        'cdev' = cdev,
+                        'mseScalingRef' = mse_scalingRef,
+                        'mseRef' = mse_ref,
+                        'mseAll' = mse_all,
+                        'repeat' = i
+                        )
+                   )
+        })
+    }) %>%
+    unlist(recursive = FALSE)
+```
+
+```{r}
+sims_c.cdev_vs_mse = lapply(sims_c.rand.norms, function(sim_i) {
+    data.frame(
+        'rep' = sim_i[['repeat']],
+        'cdev' = sim_i$cdev,
+        'mseScalingRef' = sim_i$mseScalingRef,
+        'mseRef' = sim_i$mseRef,
+        'mseAll' = sim_i$mseAll,
+        'refFraction' = sim_i$refFraction
+    )
+}) %>%
+    do.call(rbind, .)
+ggplot(sims_c.cdev_vs_mse, aes_string('mseRef', y = 'cdev')) +
+    # facet_wrap('rep') +
+    geom_point() +
+    ggtitle(sprintf('Simulation with heterogenous fold-change,\nngenes=%s,nrefs=%s',NGENES, NREFS))
+```
+
+
+## Simulation with heterogenous fold-change, at varying DE percentage
+
+
+```{r}
+NGENES = 4000
+NSAMPLES = 30
+percentDEs = c(1:9/10)
+
+sims_d <-
+    lapply(percentDEs, function(percentDE) {
+        simulate.counts.varyingfc(ngenes = NGENES, nlibs1 = NSAMPLES %/% 2, nlibs2 = NSAMPLES - (NSAMPLES %/% 2), percentDE = percentDE)
+    }) %>%
+    set_names(percentDEs)
+
+sims_d.ref <-
+    lapply(percentDEs, function(percentDE) {
+        sim = sims_d[[as.character(percentDE)]]
+        normalize.by.refs(sim$counts, which(sim$differential == 0))
+    }) %>%
+    set_names(percentDEs)
+```
+
+Normalize by random subsets with varying fraction of true reference genes
+
+```{r}
+refFractions = c(0:10/10)
+NCORES = 6 
+NREPEATS = 30
+sims_d.rand.norms =
+    mclapply(percentDEs, mc.cores = NCORES, FUN = function(percentDE) {
+            sim = sims_d[[as.character(percentDE)]]
+            sim.norm.ref = sims_d.ref[[as.character(percentDE)]]
+            trueRef.idx = which(sim$differential == 0)
+            trueDif.idx = which(sim$differential == 1)
+            nrefs = length(trueRef.idx)
+            
+            lapply(refFractions, function(k) {
+                lapply(1:NREPEATS, function(i) {
+                    rand.ref = sample(trueRef.idx, size = floor(k*length(trueRef.idx)))
+                    rand.dif = sample(trueDif.idx, size = min(length(trueDif.idx), nrefs - length(rand.ref)))
+                    rand.subset = union(rand.ref, rand.dif)
+                    
+                    sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
+                    raw = apply(sim$counts[rand.subset,], 2, sum)
+                    scalingFactors = raw / gbnorm:::geom.mean(raw)
+                    mseRef = mean((logFC(sim.norm.i[trueRef.idx,], sim$conditions$condition, log.base = 2, pseudocount = 1))^2)
+                    list('scalingFactors' = scalingFactors,
+                                # 'foldChange' = foldChange,
+                                'percentDE' = percentDE,
+                                'rand.subset' = rand.subset,
+                                'refFraction' = k,
+                                'cdev' =  cdev(sim.norm.i, sim.norm.ref),
+                                'mseRef' = mseRef
+                         )
+                }) 
+            }) %>%
+            unlist(recursive = FALSE)
+    }) %>%
+    unlist(recursive = FALSE)
+```
+
+
+```{r,fig.width=6,fig.height=7}
+sims_d.cdev_vs_mse = lapply(sims_d.rand.norms, function(sim_i) {
+    data.frame(
+        'cdev' = sim_i$cdev,
+        'mseRef' = sim_i$mseRef,
+        'refFraction' = sim_i$refFraction,
+        'percentDE' = sim_i$percentDE
+    )
+}) %>%
+    do.call(rbind, .)
+ggplot(sims_d.cdev_vs_mse, aes_string('mseRef', y = 'cdev')) +
+    facet_wrap('percentDE') +
+    geom_point(alpha=0.5) +
+    xlab('Fold-change MSE') +
+    ggtitle(sprintf('Simulation with heterogenous fold-change,\nat varying DE percentage,\nngenes=%s,nsamples=%s',NGENES, NSAMPLES)) +
+    theme_bw(base_size = 14)
+ggsave(filename = 'cdev-vs-mse-simulation.png',width = 6,height = 7)
+```
+
+## Loading real data
+
+```{r}
+load('../data/data_container.Rdata')
+DATASET_PREFIXES = c('rbm1', 'rbm2', 'rnor1', 'rnor2',
+                     'dmelAC', 'dmelAV', 'xtro1m', 'xtro2',
+                     'mpreg1a', 'mpreg1b', 'mpreg2a', 'mpreg2b',
+                     'sarcoma', 'yfv', 'lymphoma'
+                     )
+```
+
+## RatBodymap, ERCC Mix 1
+
+```{r}
+NREPEATS = 60
+NCORES = 6
+data_prefix = 'rbm1'
+selected_pheno = 'Organ'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+
+```{r,fig.width=5,fig.height=11}
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', scales = 'free', ncol = 2) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix) +
+    theme_bw(base_size = 14)
+    # scale_x_log10() +
+    # scale_y_log10()
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', ncol = 2) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix) +
+    theme_bw(base_size = 14)
+```
+
+### Discordance: Brain - Spleen
+
+```{r,fig.width=8,fig.height=5}
+rbm1.normed = get('rbm1.normed', envir = data.container)
+rbm1.pheno = get('rbm1.pheno', envir = data.container)
+rbm1.cnt = get('rbm1.cnt', envir = data.container)
+rbm1.refs.idx = get('rbm1.refs.idx', envir = data.container)
+the_selected_samples = which(rbm1.pheno$Organ %in% c('Brain', 'Spleen'))
+group = rbm1.pheno$Organ[the_selected_samples]
+the_random_refs = rbm1.cdev_vs_mse[which(rbm1.cdev_vs_mse$condition_pair == 'Brain-Spleen' & 
+                                             rbm1.cdev_vs_mse$cdev > 11 &
+                                             rbm1.cdev_vs_mse$mse_TrueRefs < 0.2),'rand.refs.idx'] %>%
+    strsplit(',') %>%
+    `[[`(1) %>%
+    as.integer()
+
+x_i = normalize.by.refs(rbm1.cnt[,the_selected_samples], the_random_refs)
+the_mse = mean(logFC(x_i[rbm1.refs.idx,], groups = group, pseudocount = 1)^2)
+the_cdev = cdev(x_i,rbm1.normed[,the_selected_samples])
+
+par(mfrow=c(1,3))
+plot.matrix(log2(   rbm1.cnt[c(the_random_refs,rbm1.refs.idx),the_selected_samples]+1),main = 'Raw',asp=5/3)
+plot.matrix(log2(        x_i[c(the_random_refs,rbm1.refs.idx),]+1),main = 'RandRefs-normalized',asp=5/3)
+plot.matrix(log2(rbm1.normed[c(the_random_refs,rbm1.refs.idx),the_selected_samples]+1),main = 'TrueRefs-normalized',asp=5/3)
+rbm1.rand.pca = project.pca(t(x_i[rbm1.refs.idx,]), selected.pc = c(1:3)) %>%
+    cbind(rbm1.pheno[the_selected_samples,c('Organ', 'Age_Week')])
+
+rbm1.true.pca = project.pca(t(rbm1.normed[rbm1.refs.idx,the_selected_samples]), selected.pc = c(1:3)) %>%
+    cbind(rbm1.pheno[the_selected_samples,c('Organ', 'Age_Week')])
+ggplot(rbm1.rand.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Age_Week),shape=Organ)) + scale_shape_manual(values=c(1,4))
+ggplot(rbm1.true.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Age_Week),shape=Organ)) + scale_shape_manual(values=c(1,4))
+
+
+plot.pca.combo(rbm1.rand.pca, 'Organ', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(rbm1.true.pca, 'Organ', title = 'TrueRefs-normalized\n')
+
+```
+
+### Discordance: Spleen - Liver
+
+```{r,fig.width=8,fig.height=5}
+rbm1.normed = get('rbm1.normed', envir = data.container)
+rbm1.pheno = get('rbm1.pheno', envir = data.container)
+rbm1.cnt = get('rbm1.cnt', envir = data.container)
+rbm1.refs.idx = get('rbm1.refs.idx', envir = data.container)
+the_selected_samples = which(rbm1.pheno$Organ %in% c('Spleen', 'Liver'))
+group = rbm1.pheno$Organ[the_selected_samples]
+the_random_refs = rbm1.cdev_vs_mse[which(rbm1.cdev_vs_mse$condition_pair == 'Spleen-Liver' & rbm1.cdev_vs_mse$cdev > 15 & rbm1.cdev_vs_mse$mse_TrueRefs < 0.2),'rand.refs.idx'] %>%
+    strsplit(',') %>%
+    `[[`(1) %>%
+    as.integer()
+
+x_i = normalize.by.refs(rbm1.cnt[,the_selected_samples], the_random_refs)
+the_mse = mean(logFC(x_i[rbm1.refs.idx,], groups = group, pseudocount = 1)^2)
+the_cdev = cdev(x_i,rbm1.normed[,the_selected_samples])
+
+par(mfrow=c(1,3))
+plot.matrix(log2(   rbm1.cnt[c(the_random_refs,rbm1.refs.idx),the_selected_samples]+1),main = 'Raw',asp=5/3)
+plot.matrix(log2(        x_i[c(the_random_refs,rbm1.refs.idx),]+1),main = 'RandRefs-normalized',asp=5/3)
+plot.matrix(log2(rbm1.normed[c(the_random_refs,rbm1.refs.idx),the_selected_samples]+1),main = 'TrueRefs-normalized',asp=5/3)
+rbm1.rand.pca = project.pca(t(x_i[rbm1.refs.idx,]), selected.pc = c(1:3)) %>%
+    cbind(rbm1.pheno[the_selected_samples,c('Organ', 'Age_Week')])
+
+rbm1.true.pca = project.pca(t(rbm1.normed[rbm1.refs.idx,the_selected_samples]), selected.pc = c(1:3)) %>%
+    cbind(rbm1.pheno[the_selected_samples,c('Organ', 'Age_Week')])
+ggplot(rbm1.rand.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Age_Week),shape=Organ)) + scale_shape_manual(values=c(1,4))
+ggplot(rbm1.true.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Age_Week),shape=Organ)) + scale_shape_manual(values=c(1,4))
+
+
+plot.pca.combo(rbm1.rand.pca, 'Organ', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(rbm1.true.pca, 'Organ', title = 'TrueRefs-normalized\n')
+
+```
+
+## RatBodymap, ERCC Mix 2
+
+```{r}
+NREPEATS = 60
+NCORES = 6
+data_prefix = 'rbm2'
+selected_pheno = 'Organ'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+
+```{r,fig.width=8,fig.height=12}
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', scales = 'free', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix) +
+    theme_bw(base_size = 14)
+    # scale_x_log10() +
+    # scale_y_log10()
+ggsave('cdev-vs-mse-rbm2-free.png')
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix) +
+    theme_bw(base_size = 14)
+ggsave('cdev-vs-mse-rbm2-fixed.png')
+```
+
+### Discordance: Thymus - Lung
+
+```{r,fig.width=8,fig.height=5}
+rbm2.normed = get('rbm2.normed', envir = data.container)
+rbm2.pheno = get('rbm2.pheno', envir = data.container)
+rbm2.cnt = get('rbm2.cnt', envir = data.container)
+rbm2.refs.idx = get('rbm2.refs.idx', envir = data.container)
+the_selected_samples = which(rbm2.pheno$Organ %in% c('Thymus', 'Lung'))
+group = rbm2.pheno$Organ[the_selected_samples]
+the_random_refs = rbm2.cdev_vs_mse[which(rbm2.cdev_vs_mse$condition_pair == 'Thymus-Lung' &
+                                             rbm2.cdev_vs_mse$cdev >12 & 
+                                             rbm2.cdev_vs_mse$mse_TrueRefs<0.1),'rand.refs.idx'] %>%
+    strsplit(',') %>%
+    `[[`(1) %>%
+    as.integer()
+
+x_i = normalize.by.refs(rbm2.cnt[,the_selected_samples], the_random_refs)
+the_mse = mean(logFC(x_i[rbm2.refs.idx,], groups = group, pseudocount = 1)^2)
+the_cdev = cdev(x_i,rbm2.normed[,the_selected_samples])
+
+par(mfrow=c(1,3))
+plot.matrix(log2(   rbm2.cnt[c(the_random_refs,rbm2.refs.idx),the_selected_samples]+1),main = 'Raw',asp=5/3)
+plot.matrix(log2(        x_i[c(the_random_refs,rbm2.refs.idx),]+1),main = 'RandRefs-normalized',asp=5/3)
+plot.matrix(log2(rbm2.normed[c(the_random_refs,rbm2.refs.idx),the_selected_samples]+1),main = 'TrueRefs-normalized',asp=5/3)
+rbm2.rand.pca = project.pca(t(x_i[rbm2.refs.idx,]), selected.pc = c(1:3)) %>%
+    cbind(rbm2.pheno[the_selected_samples,c('Organ', 'Age_Week')])
+
+rbm2.true.pca = project.pca(t(rbm2.normed[rbm2.refs.idx,the_selected_samples]), selected.pc = c(1:3)) %>%
+    cbind(rbm2.pheno[the_selected_samples,c('Organ', 'Age_Week')])
+ggplot(rbm2.rand.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Age_Week),shape=Organ)) + scale_shape_manual(values=c(1,4))  +
+    theme_bw(base_size = 14)
+ggplot(rbm2.true.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Age_Week),shape=Organ)) + scale_shape_manual(values=c(1,4)) +
+    theme_bw(base_size = 14)
+
+
+plot.pca.combo(rbm2.rand.pca, 'Organ', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(rbm2.true.pca, 'Organ', title = 'TrueRefs-normalized\n')
+
+```
+
+### Discordance: Heart - Kidney
+
+```{r,fig.width=8,fig.height=5}
+rbm2.normed = get('rbm2.normed', envir = data.container)
+rbm2.pheno = get('rbm2.pheno', envir = data.container)
+rbm2.cnt = get('rbm2.cnt', envir = data.container)
+rbm2.refs.idx = get('rbm2.refs.idx', envir = data.container)
+the_selected_samples = which(rbm2.pheno$Organ %in% c('Heart', 'Kidney'))
+group = rbm2.pheno$Organ[the_selected_samples]
+the_random_refs = rbm2.cdev_vs_mse[which(rbm2.cdev_vs_mse$condition_pair == 'Heart-Kidney' &
+                                             rbm2.cdev_vs_mse$cdev > 20 & 
+                                             rbm2.cdev_vs_mse$mse_TrueRefs<0.5),'rand.refs.idx'] %>%
+    strsplit(',') %>%
+    `[[`(1) %>%
+    as.integer()
+
+x_i = normalize.by.refs(rbm2.cnt[,the_selected_samples], the_random_refs)
+the_mse = mean(logFC(x_i[rbm2.refs.idx,], groups = group, pseudocount = 1)^2)
+the_cdev = cdev(x_i,rbm2.normed[,the_selected_samples])
+
+par(mfrow=c(1,3))
+plot.matrix(log2(   rbm2.cnt[c(the_random_refs,rbm2.refs.idx),the_selected_samples]+1),main = 'Raw',asp=5/3)
+plot.matrix(log2(        x_i[c(the_random_refs,rbm2.refs.idx),]+1),main = 'RandRefs-normalized',asp=5/3)
+plot.matrix(log2(rbm2.normed[c(the_random_refs,rbm2.refs.idx),the_selected_samples]+1),main = 'TrueRefs-normalized',asp=5/3)
+rbm2.rand.pca = project.pca(t(x_i[rbm2.refs.idx,]), selected.pc = c(1:3)) %>%
+    cbind(rbm2.pheno[the_selected_samples,c('Organ', 'Age_Week')])
+
+rbm2.true.pca = project.pca(t(rbm2.normed[rbm2.refs.idx,the_selected_samples]), selected.pc = c(1:3)) %>%
+    cbind(rbm2.pheno[the_selected_samples,c('Organ', 'Age_Week')])
+ggplot(rbm2.rand.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Age_Week),shape=Organ)) + scale_shape_manual(values=c(1,4))
+ggplot(rbm2.true.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Age_Week),shape=Organ)) + scale_shape_manual(values=c(1,4))
+
+
+pl_rand = plot.pca.combo(rbm2.rand.pca, 'Organ', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+ggsave('cdev-mse-discordance-rbm2-heart-kidney-rand_pca.png', plot = pl_rand, width = 8, height = 5)
+pl_true = plot.pca.combo(rbm2.true.pca, 'Organ', title = 'TrueRefs-normalized\n')
+ggsave('cdev-mse-discordance-rbm2-heart-kidney-true_pca.png', plot = pl_true, width = 8, height = 5)
+```
+
+## YFV
+
+```{r}
+NREPEATS = 100
+NCORES = 5
+data_prefix = 'yfv'
+selected_pheno = 'Infection'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+```{r,fig.width=10,fig.height=4}
+ggplot(yfv.cdev_vs_mse) +
+    facet_wrap('condition_pair', scales = 'free') +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle('yfv')
+
+ggplot(yfv.cdev_vs_mse) +
+    facet_wrap('condition_pair') +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle('yfv')
+```
+
+### Discordance: vaccine - control
+
+```{r}
+yfv.normed = get('yfv.normed', envir = data.container)
+yfv.pheno = get('yfv.pheno', envir = data.container)
+yfv.cnt = get('yfv.cnt', envir = data.container)
+yfv.refs.idx = get('yfv.refs.idx', envir = data.container)
+the_selected_samples = which(yfv.pheno$Infection %in% c('vaccine', 'control'))
+group = yfv.pheno$Infection[the_selected_samples]
+the_random_refs = yfv.cdev_vs_mse[which(yfv.cdev_vs_mse$condition_pair == 'vaccine-control' &
+                                             yfv.cdev_vs_mse$cdev > 3.25 & 
+                                             yfv.cdev_vs_mse$mse_TrueRefs<0.5),'rand.refs.idx'] %>%
+    strsplit(',') %>%
+    `[[`(1) %>%
+    as.integer()
+
+x_i = normalize.by.refs(yfv.cnt[,the_selected_samples], the_random_refs)
+the_mse = mean(logFC(x_i[yfv.refs.idx,], groups = group, pseudocount = 1)^2)
+the_cdev = cdev(x_i,yfv.normed[,the_selected_samples])
+
+par(mfrow=c(1,3))
+plot.matrix(log2(   yfv.cnt[c(the_random_refs,yfv.refs.idx),the_selected_samples]+1),main = 'Raw',asp=5/3)
+plot.matrix(log2(        x_i[c(the_random_refs,yfv.refs.idx),]+1),main = 'RandRefs-normalized',asp=5/3)
+plot.matrix(log2(yfv.normed[c(the_random_refs,yfv.refs.idx),the_selected_samples]+1),main = 'TrueRefs-normalized',asp=5/3)
+yfv.rand.pca = project.pca(t(x_i[yfv.refs.idx,]), selected.pc = c(1:3)) %>%
+    cbind(yfv.pheno[the_selected_samples,c('Infection', 'Model')])
+
+yfv.true.pca = project.pca(t(yfv.normed[yfv.refs.idx,the_selected_samples]), selected.pc = c(1:3)) %>%
+    cbind(yfv.pheno[the_selected_samples,c('Infection', 'Model')])
+ggplot(yfv.rand.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Model),shape=Infection)) + scale_shape_manual(values=c(1,4))
+ggplot(yfv.true.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Model),shape=Infection)) + scale_shape_manual(values=c(1,4))
+
+
+plot.pca.combo(yfv.rand.pca, 'Infection', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(yfv.true.pca, 'Infection', title = 'TrueRefs-normalized\n')
+
+```
+
+### YFV, separate cell models
+
+```{r}
+for (cell_model in c('monocellular model', 'pluricellular model')) {
+    dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container) %>%
+        subset(Model == cell_model)
+    dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)[,dat.pheno$BiosampleId]
+    dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+    
+    condition_pairs = combn(sort(unique(dat.pheno[[selected_pheno]])), 2)
+    
+    cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+        selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+        dat.cnt_pair = dat.cnt[,selected_samples]
+        dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+        group = dat.pheno[[selected_pheno]][selected_samples]
+        idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+        # To make sure the plots are re-producible
+        rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+            set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+        })
+        mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+            rand.refs = rand.refs.list[,i]
+            x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+            data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                       'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                       'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                       'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+            )
+        }) %>%
+            do.call(rbind, .)
+    }) %>%
+        do.call(rbind, .)
+    
+    assign(paste0('yfv.', gsub(' ', cell_model, '_'), '.cdev_vs_mse'), cdev.mse.df)
+}
+```
+
+```{r,fig.width=10,fig.height=4}
+for (cell_model in c('monocellular model', 'pluricellular model')) {
+    the_df = get(paste0('yfv.', gsub(' ', cell_model, '_'), '.cdev_vs_mse'))
+    p_free = ggplot(the_df) +
+        facet_wrap('condition_pair', scales = 'free') +
+        geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+        ggtitle(sprintf('yfv - %s', cell_model))
+    
+    p_fixed = ggplot(the_df) +
+        facet_wrap('condition_pair') +
+        geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+        ggtitle(sprintf('yfv - %s', cell_model))
+    print(p_free)
+    print(p_fixed)
+}
+```
+
+## Lymphoma
+
+```{r}
+NREPEATS = 100
+NCORES = 1
+data_prefix = 'lymphoma'
+selected_pheno = 'Treatment'
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container) %>%
+    subset(CellLine == 'PAR')
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)[,dat.pheno$BiosampleId]
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(sort(unique(dat.pheno[[selected_pheno]])), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+```{r,fig.width=10,fig.height=4}
+ggplot(lymphoma.cdev_vs_mse) +
+    facet_wrap('condition_pair', scales = 'free') +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle('lymphoma - PAR cell line') +
+    theme_bw(base_size = 14)
+
+ggplot(lymphoma.cdev_vs_mse) +
+    facet_wrap('condition_pair') +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle('lymphoma - PAR cell line') +
+    theme_bw(base_size = 14)
+
+```
+
+### Lymphoma, separated into 4 cell lines
+
+```{r}
+NREPEATS = 100
+NCORES = 1
+data_prefix = 'lymphoma'
+selected_pheno = 'Treatment'
+
+for (cell_line in c('PAR', 'L20', 'J4', 'I10')) {
+    dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container) %>%
+        subset(CellLine == cell_line)
+    dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)[,dat.pheno$BiosampleId]
+    dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+    
+    dat.pheno[[selected_pheno]] %>% table()
+    condition_pairs = combn(sort(unique(dat.pheno[[selected_pheno]])), 2)
+    
+    cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+        selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+        dat.cnt_pair = dat.cnt[,selected_samples]
+        dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+        group = dat.pheno[[selected_pheno]][selected_samples]
+        idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+        # To make sure the plots are re-producible
+        rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+            set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+        })
+        mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+            rand.refs = rand.refs.list[,i]
+            x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+            data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                       'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                       'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                       'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+            )
+        }) %>%
+            do.call(rbind, .)
+    }) %>%
+        do.call(rbind, .)
+    
+    assign(paste0('lymphoma.', cell_line, '.cdev_vs_mse'), cdev.mse.df)
+}
+```
+
+```{r,fig.width=8,fig.height=3}
+for (cell_line in c('PAR', 'L20', 'J4', 'I10')) {
+    the_df = get(paste0('lymphoma.', cell_line, '.cdev_vs_mse'))
+    p_free = ggplot(the_df) +
+        facet_wrap('condition_pair', scales = 'free') +
+        geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+        ggtitle(sprintf('lymphoma - %s cell line', cell_line)) +
+        theme_bw(base_size = 14)
+    
+    p_fixed = ggplot(the_df) +
+        facet_wrap('condition_pair') +
+        geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+        ggtitle(sprintf('lymphoma - %s cell line', cell_line)) +
+        theme_bw(base_size = 14)
+    assign(sprintf('pl.lymphoma.%s.fixed', cell_line), p_fixed)
+    print(p_free)
+    print(p_fixed)
+}
+```
+
+Juxtapose all cell lines
+
+```{r,fig.width=8,fig.height=10}
+lymphoma.cdev_vs_mse = lapply(c('PAR', 'L20', 'J4', 'I10'), function(cell_line) {
+    x = get(paste0('lymphoma.', cell_line, '.cdev_vs_mse'))
+    x$CellLine = cell_line
+    return(x)
+}) %>%
+    do.call(rbind, .)
+ggplot(lymphoma.cdev_vs_mse) +
+    facet_grid(CellLine ~ condition_pair) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    theme_bw(base_size = 14)
+```
+
+### Lymphoma, combine 2 cell lines (I10 & L20)
+
+```{r}
+NREPEATS = 100
+NCORES = 1
+data_prefix = 'lymphoma'
+selected_pheno = 'Treatment'
+
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container) %>%
+    subset(CellLine == 'I10' | CellLine == 'L20')
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)[,dat.pheno$BiosampleId]
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(sort(unique(dat.pheno[[selected_pheno]])), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0('lymphoma.I10_L20.cdev_vs_mse'), cdev.mse.df)
+```
+
+```{r,fig.width=8,fig.height=3}
+pl.lymphoma.I10_l20.free = ggplot(lymphoma.I10_L20.cdev_vs_mse) +
+    facet_wrap('condition_pair', scales = 'free') +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle('lymphoma - I10 + L20') +
+    theme_bw(base_size = 14)
+
+pl.lymphoma.I10_l20.fixed = ggplot(lymphoma.I10_L20.cdev_vs_mse) +
+    facet_wrap('condition_pair') +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle('lymphoma - I10 + L20') +
+    theme_bw(base_size = 14)
+print(pl.lymphoma.I10_l20.free)
+print(pl.lymphoma.I10_l20.fixed)
+```
+
+Combining plots for publication figure
+
+```{r,fig.width=7,fig.height=7}
+pl.lymphoma = egg::ggarrange(pl.lymphoma.I10.fixed + theme(plot.title =element_blank(), axis.title.x = element_blank()),
+               pl.lymphoma.L20.fixed + theme(plot.title =element_blank(), axis.title.x = element_blank()),
+               pl.lymphoma.I10_l20.fixed + theme(plot.title =element_blank()),
+               ncol = 1)
+ggsave(plot = pl.lymphoma, 'cdev-vs-mse-lymphoma-I10_L20-3rows-fixed.png')
+```
+
+## Sarcoma
+
+```{r}
+NREPEATS = 100
+NCORES = 5
+data_prefix = 'sarcoma'
+selected_pheno = 'Metastasis'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+
+```{r,fig.width=10,fig.height=4}
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', scales = 'free', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix) +
+    theme_bw(base_size = 14)
+    # scale_x_log10() +
+    # scale_y_log10()
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix) +
+    theme_bw(base_size = 14)
+```
+
+## D. melanogaster
+
+### dmelAC
+
+```{r}
+NREPEATS = 100
+NCORES = 5
+data_prefix = 'dmelAC'
+selected_pheno = 'Environment'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+
+```{r}
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', scales = 'free', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+    # scale_x_log10() +
+    # scale_y_log10()
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+```
+
+#### When cdev is so high
+
+```{r}
+dat.normed = get('dmelAC.normed', envir = data.container)
+the_selected_samples = which(dat.pheno$Environment %in% c(1,2))
+group = dat.pheno$Environment[the_selected_samples]
+dat.pheno$Environment = factor(dat.pheno$Environment)
+
+the_random_refs = dmelAC.cdev_vs_mse[which(dmelAC.cdev_vs_mse$condition_pair == '1-2' &
+                                             (40 < dmelAC.cdev_vs_mse$cdev) &
+                                             (dmelAC.cdev_vs_mse$mse_TrueRefs < 0.5)),'rand.refs.idx'] %>%
+    strsplit(',') %>%
+    `[[`(1) %>%
+    as.integer()
+
+x_i = normalize.by.refs(dat.cnt[,the_selected_samples], the_random_refs)
+the_mse = mean(logFC(x_i[dat.refs.idx,], groups = group, pseudocount = 1)^2)
+the_cdev = cdev(x_i,dat.normed[,the_selected_samples])
+
+par(mfrow=c(1,3))
+plot.matrix(log2(   dat.cnt[c(the_random_refs,dat.refs.idx),the_selected_samples]+1),main = 'Raw',asp=5/3)
+plot.matrix(log2(        x_i[c(the_random_refs,dat.refs.idx),]                   +1),main = 'RandRefs-normalized',asp=5/3)
+plot.matrix(log2(dat.normed[c(the_random_refs,dat.refs.idx),the_selected_samples]+1),main = 'TrueRefs-normalized',asp=5/3)
+
+dmelAC.rand.pca = project.pca(t(x_i[dat.refs.idx,]), selected.pc = c(1:3)) %>%
+    cbind(dat.pheno[the_selected_samples,c('Sex', 'Environment', 'FlowcellId', 'InstrumentId', 'RNA_Prep_Method')])
+
+dmelAC.true.pca = project.pca(t(dat.normed[dat.refs.idx,the_selected_samples]), selected.pc = c(1:3)) %>%
+    cbind(dat.pheno[the_selected_samples,c('Sex', 'Environment', 'FlowcellId', 'InstrumentId', 'RNA_Prep_Method')])
+
+
+plot.pca.combo(dmelAC.rand.pca, 'Environment', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(dmelAC.true.pca, 'Environment', title = 'TrueRefs-normalized\n')
+plot.pca.combo(dmelAC.rand.pca, 'Sex', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(dmelAC.true.pca, 'Sex', title = 'TrueRefs-normalized\n')
+plot.pca.combo(dmelAC.rand.pca, 'FlowcellId', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(dmelAC.true.pca, 'FlowcellId', title = 'TrueRefs-normalized\n')
+
+plot.pca.combo(dmelAC.rand.pca, 'InstrumentId', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(dmelAC.true.pca, 'InstrumentId', title = 'TrueRefs-normalized\n')
+```
+
+### dmelAV
+
+```{r}
+NREPEATS = 100
+NCORES = 5
+data_prefix = 'dmelAV'
+selected_pheno = 'Environment'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+
+```{r}
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', scales = 'free', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+    # scale_x_log10() +
+    # scale_y_log10()
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+```
+
+## Mouse brain
+
+### mpreg1a
+
+```{r}
+NREPEATS = 100
+NCORES = 5
+data_prefix = 'mpreg1a'
+selected_pheno = 'BrainRegion'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+```{r,fig.width=10,fig.height=4}
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', scales = 'free', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+    # scale_x_log10() +
+    # scale_y_log10()
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+```
+
+#### Low cdev, high MSE
+
+```{r}
+mpreg1a.normed = get('mpreg1a.normed', envir = data.container)
+mpreg1a.pheno = get('mpreg1a.pheno', envir = data.container)
+mpreg1a.cnt = get('mpreg1a.cnt', envir = data.container)
+mpreg1a.refs.idx = get('mpreg1a.refs.idx', envir = data.container)
+the_selected_samples = which(mpreg1a.pheno$BrainRegion %in% c('Neocortex', 'Hippocampus'))
+group = mpreg1a.pheno$BrainRegion[the_selected_samples]
+the_random_refs = mpreg1a.cdev_vs_mse[which(mpreg1a.cdev_vs_mse$condition_pair == 'Neocortex-Hippocampus' &
+                                             mpreg1a.cdev_vs_mse$cdev <2.6  & 
+                                             mpreg1a.cdev_vs_mse$mse_TrueRefs> 0.4),'rand.refs.idx'] %>%
+    strsplit(',') %>%
+    `[[`(1) %>%
+    as.integer()
+
+x_i = normalize.by.refs(mpreg1a.cnt[,the_selected_samples], the_random_refs)
+the_mse = mean(logFC(x_i[mpreg1a.refs.idx,], groups = group, pseudocount = 1)^2)
+the_cdev = cdev(x_i,mpreg1a.normed[,the_selected_samples])
+
+par(mfrow=c(1,3))
+plot.matrix(log2(   mpreg1a.cnt[c(the_random_refs,mpreg1a.refs.idx),the_selected_samples]+1),main = 'Raw',asp=5/3)
+plot.matrix(log2(        x_i[c(the_random_refs,mpreg1a.refs.idx),]+1),main = 'RandRefs-normalized',asp=5/3)
+plot.matrix(log2(mpreg1a.normed[c(the_random_refs,mpreg1a.refs.idx),the_selected_samples]+1),main = 'TrueRefs-normalized',asp=5/3)
+mpreg1a.rand.pca = project.pca(t(x_i[mpreg1a.refs.idx,]), selected.pc = c(1:3)) %>%
+    cbind(mpreg1a.pheno[the_selected_samples,c('BrainRegion', 'Stage')])
+
+mpreg1a.true.pca = project.pca(t(mpreg1a.normed[mpreg1a.refs.idx,the_selected_samples]), selected.pc = c(1:3)) %>%
+    cbind(mpreg1a.pheno[the_selected_samples,c('BrainRegion', 'Stage')])
+ggplot(mpreg1a.rand.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Stage),shape=BrainRegion)) + scale_shape_manual(values=c(1,4))
+ggplot(mpreg1a.true.pca) + geom_point(aes(x=PC1,y=PC2,color=factor(Stage),shape=BrainRegion)) + scale_shape_manual(values=c(1,4))
+
+
+plot.pca.combo(mpreg1a.rand.pca, 'BrainRegion', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(mpreg1a.true.pca, 'BrainRegion', title = 'TrueRefs-normalized\n')
+```
+
+
+### mpreg1b
+
+```{r}
+NREPEATS = 100
+NCORES = 5
+data_prefix = 'mpreg1b'
+selected_pheno = 'Stage'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+
+```{r,fig.width=10,fig.height=4}
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', scales = 'free', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+    # scale_x_log10() +
+    # scale_y_log10()
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+```
+
+### mpreg2a
+
+```{r}
+NREPEATS = 100
+NCORES = 5
+data_prefix = 'mpreg2a'
+selected_pheno = 'BrainRegion'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+
+```{r,fig.width=10,fig.height=4}
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', scales = 'free', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+    # scale_x_log10() +
+    # scale_y_log10()
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+```
+### mpreg2b
+
+```{r}
+NREPEATS = 100
+NCORES = 5
+data_prefix = 'mpreg2b'
+selected_pheno = 'Stage'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    # To make sure the plots are re-producible
+    rand.refs.list = vapply(1:NREPEATS, FUN.VALUE = rep(0, length(dat.refs.idx)), FUN = function(i) {
+        set.seed(i); sample(x = idx.nonZero, size = length(dat.refs.idx), replace = FALSE, prob = NULL) 
+    })
+    mclapply(1:NREPEATS, mc.cores = NCORES, FUN = function(i) {
+        rand.refs = rand.refs.list[,i]
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+
+```{r,fig.width=10,fig.height=4}
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', scales = 'free', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+    # scale_x_log10() +
+    # scale_y_log10()
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+```
+
+## X. tropicalis development
+
+```{r}
+data_prefix = 'xtro1m'
+selected_pheno = 'Clutch'
+dat.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+dat.pheno = get(paste0(data_prefix, '.pheno'), envir = data.container)
+dat.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+
+dat.pheno[[selected_pheno]] %>% table()
+condition_pairs = combn(unique(dat.pheno[[selected_pheno]]), 2)
+
+cdev.mse.df = lapply(1:ncol(condition_pairs), FUN = function(j) {
+    selected_samples = which(dat.pheno[[selected_pheno]] %in% condition_pairs[,j])
+    dat.cnt_pair = dat.cnt[,selected_samples]
+    dat.norm_pair = normalize.by.refs(dat.cnt_pair, dat.refs.idx)
+    group = dat.pheno[[selected_pheno]][selected_samples]
+    idx.nonZero = which(apply(dat.cnt_pair,1,min) > 0)
+    mclapply(1:60, mc.cores = 6, FUN = function(i) {
+        rand.refs = sample(idx.nonZero,size = length(dat.refs.idx))
+        x_i = normalize.by.refs(dat.cnt_pair, rand.refs)
+        data.frame('cdev' = cdev(x_i, dat.norm_pair),
+                   'mse_TrueRefs' = mean(logFC(x_i[dat.refs.idx,], group, pseudocount = 1)^2),
+                   'rand.refs.idx' = paste(rand.refs,collapse = ','),
+                   'condition_pair' = paste(condition_pairs[,j], collapse = '-')
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+assign(paste0(data_prefix, '.cdev_vs_mse'), cdev.mse.df)
+```
+
+```{r}
+ggplot(get(paste0(data_prefix, '.cdev_vs_mse'))) +
+    facet_wrap('condition_pair', ncol = 3) +
+    geom_point(aes(x=mse_TrueRefs,y=cdev)) +
+    ggtitle(data_prefix)
+```
+
+```{r}
+dat.normed = get('xtro1m.normed', envir = data.container)
+group = dat.pheno$Clutch
+
+the_random_refs = xtro1m.5h.cdev_vs_mse[which((20 < xtro1m.5h.cdev_vs_mse$cdev) &
+                                              (xtro1m.5h.cdev_vs_mse$mse_TrueRefs < 0.5)),'rand.refs.idx'] %>%
+    strsplit(',') %>%
+    `[[`(1) %>%
+    as.integer()
+
+x_i = normalize.by.refs(dat.cnt, the_random_refs)
+the_mse = mean(logFC(x_i[dat.refs.idx,], groups = group, pseudocount = 1)^2)
+the_cdev = cdev(x_i,dat.normed)
+
+par(mfrow=c(1,3))
+plot.matrix(log2(   dat.cnt[c(the_random_refs,dat.refs.idx),]+1),main = 'Raw',asp=5/3)
+plot.matrix(log2(        x_i[c(the_random_refs,dat.refs.idx),]                   +1),main = 'RandRefs-normalized',asp=5/3)
+plot.matrix(log2(dat.normed[c(the_random_refs,dat.refs.idx),]+1),main = 'TrueRefs-normalized',asp=5/3)
+
+xtro1m.rand.pca = project.pca(t(x_i[dat.refs.idx,]), selected.pc = c(1:3)) %>%
+    cbind(dat.pheno[,c('Clutch', 'Time.hpf.')])
+
+xtro1m.true.pca = project.pca(t(dat.normed[dat.refs.idx,]), selected.pc = c(1:3)) %>%
+    cbind(dat.pheno[,c('Clutch', 'Time.hpf.')])
+
+
+plot.pca.combo(xtro1m.rand.pca, 'Clutch', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(xtro1m.true.pca, 'Clutch', title = 'TrueRefs-normalized\n')
+plot.pca.combo(xtro1m.rand.pca, 'Time.hpf.', title = sprintf('RandRefs-normalized,\ncdev = %.3e, mse = %.3e', the_cdev, the_mse))
+plot.pca.combo(xtro1m.true.pca, 'Time.hpf.', title = 'TrueRefs-normalized\n')
+```
+
+
