@@ -1,0 +1,175 @@
+---
+title: "cdev range in real data sets"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+library(magrittr)
+library(ggplot2)
+library(parallel)
+library(Biobase)
+options(stringsAsFactors = FALSE)
+devtools::load_all('../')
+burd = colorRampPalette(colors = c("blue", "white", "red"))(n = 255)
+rdbu = colorRampPalette(colors = c("red", "white", "blue"))(n = 255)
+blues = colorRampPalette(colors = c('white', 'blue'))(n = 255)
+breakList = seq(-1,1,by = 0.01)
+
+is.good.refs = function(cnt_matrix, min.count = 10) {
+    and(grepl('ERCC-', rownames(cnt_matrix)), apply(cnt_matrix, 1, min) >= min.count)
+}
+DATAPATH = '../data/'
+```
+
+### Summary
+
+```{r}
+load(file.path(DATAPATH,'data_container.Rdata'))
+DATASET_PREFIXES = c('rbm1', 'rbm2', 'rnor1', 'rnor2',
+                     'dmelAV', 'dmelAC', 
+                     'mpreg1a', 'mpreg1b', 'mpreg2a', 'mpreg2b',
+                     'sarcoma', 'lymphoma', 'yfv',
+                     'xtro1m', 'xtro2'
+                     )
+```
+
+
+```{r}
+lapply(DATASET_PREFIXES, function(data_prefix) {
+    x.cnt = get(paste0(data_prefix, '.cnt'), envir = data.container)
+    x.refs.idx = get(paste0(data_prefix, '.refs.idx'), envir = data.container)
+    data.frame('label' = data_prefix,
+               'n_genes' = dim(x.cnt)[1],
+               'n_samples' = dim(x.cnt)[2],
+               'n_references' = length(x.refs.idx))
+}) %>%
+    do.call(rbind, .)
+```
+
+
+## cdev(random, ground)
+
+```{r}
+env.random_vs_ground = readRDS(file.path(DATAPATH,'cdev_random_vs_ground.RDS'))
+df.random_vs_ground =
+    DATASET_PREFIXES %>%
+    # ls(env.random_vs_random) %>%
+    lapply(function(data_prefix) {
+       `$<-`(env.random_vs_ground[[data_prefix]], 'data', data_prefix)
+    }) %>%
+    do.call(rbind, .)
+
+ggplot(df.random_vs_ground) +
+    geom_boxplot(aes(x=data,y=cdev,group=data)) +
+    scale_y_log10() +
+    theme(axis.text.x = element_text(angle = 30,hjust = 1)) +
+    ggtitle('cdev(X, Y),\nX normalized by true references,\nY by random reference set of the same size')
+```
+
+```{r,fig.width=10,fig.height=10}
+ggplot(df.random_vs_ground) +
+    facet_wrap('data', scales = 'free') +
+    geom_point(aes(x=refs_cv_max,y=cdev))
+```
+
+
+## cdev(subset_ground, ground)
+
+Must be close to 1
+
+```{r}
+env.ground_vs_ground = readRDS(file.path(DATAPATH,'cdev_ground_vs_ground.RDS'))
+df.ground_vs_ground =
+    DATASET_PREFIXES %>%
+    # ls(env.random_vs_random) %>%
+    lapply(function(data_prefix) {
+       `$<-`(env.ground_vs_ground[[data_prefix]], 'data', data_prefix)
+    }) %>%
+    do.call(rbind, .)
+
+ggplot(df.ground_vs_ground) +
+    geom_boxplot(aes(x=data,y=cdev,group=data)) +
+    theme(axis.text.x = element_text(angle = 30,hjust = 1)) +
+    ggtitle('cdev(X_i, X),\nX normalized by true references S,\nX_i by random subsets of S')
+```
+
+```{r,fig.width=10,fig.height=10}
+ggplot(df.ground_vs_ground) +
+    facet_wrap('data', scales = 'free') +
+    geom_point(aes(x=refs_cv_median,y=cdev,group=data))
+```
+
+
+
+## cdev(subset_random, random)
+
+What if the "ground-truth" is wrong/random? Can $cdev(X_i, X)$ help distinguish a wrong reference normalization?
+
+```{r,fig.width=10,fig.height=10}
+env.random_vs_random = readRDS(file.path(DATAPATH,'cdev_random_vs_random.RDS'))
+df.random_vs_random =
+    DATASET_PREFIXES %>%
+    # ls(env.random_vs_random) %>%
+    lapply(function(data_prefix) {
+       `$<-`(env.random_vs_random[[data_prefix]], 'data', data_prefix)
+    }) %>%
+    do.call(rbind, .)
+
+ggplot(df.random_vs_random) +
+    facet_wrap('data', scales = 'free_y') +
+    geom_boxplot(aes(x=random_fullset_index,y=cdev,group=random_fullset_index)) +
+    scale_y_log10()
+    
+```
+```{r}
+ggplot(df.random_vs_random) +
+    geom_boxplot(aes(x=data,y=cdev)) +
+    scale_y_log10() + 
+    theme(axis.text.x = element_text(angle = 30,hjust = 1)) +
+    ggtitle('cdev(Xi, X),\nX normalized by random references S,\nXi by random subset of S')
+```
+
+```{r}
+df.random_vs_random %>%
+    ggplot() +
+    geom_point(aes(x=subset_avgCV,y=cdev))
+```
+
+## cdev behavior by data sets
+
+```{r, fig.width=12,fig.height=10}
+# df.ground_vs_ground$cdev <- df.ground_vs_ground$cdev_i_ref
+# df.random_vs_ground$cdev <- df.random_vs_ground$cdev_i_ref
+# df.random_vs_random$cdev <- df.random_vs_random$cdev_i
+
+df.bydataset = lapply(c('random_vs_random', 'random_vs_ground', 'ground_vs_ground'), function(comparison) {
+    the_df = get(paste0('df.', comparison))
+    data.frame('cdev' = the_df$cdev,
+               'data' = the_df$data, 
+               'comparison' = comparison)
+}) %>%
+    do.call(rbind, .)
+
+ggplot(df.bydataset) +
+    facet_wrap('data', scales = 'free_y') +
+    geom_boxplot(aes(x=comparison,y=cdev,color=comparison)) +
+    theme(axis.text.x = element_text(angle=60,hjust=1))
+```
+```{r,fig.width=12,fig.height=10}
+ggplot(df.bydataset) +
+    facet_wrap('data', scales = 'free_y') +
+    geom_violin(aes(x=comparison,y=cdev,color=comparison)) +
+    theme(axis.text.x = element_text(angle=60,hjust=1))
+```
+
+```{r,fig.width=10,fig.height=9}
+ggplot(df.bydataset) +
+    facet_wrap('data') +
+    geom_boxplot(aes(x=comparison,y=cdev,color=comparison)) +
+    theme_bw(base_size = 14) +
+    # theme_replace(axis.text.x = element_text(angle=60,hjust=1)) +
+    theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0)) +
+    scale_y_log10(limits=c(1,100))
+ggsave('cdev-by-dataset.png',width=10,height = 9)
+```
+
