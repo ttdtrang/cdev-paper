@@ -435,7 +435,6 @@ ggplot(performance.df) +
 NSAMPLES = 40
 nGenes = c(2000,10000, 20000, 50000)
 percentDE = 0.5 
-foldChange = 4
 sims_rg <- lapply(nGenes, function(nGene) {
     simulate.counts.varyingfc(ngenes = nGene, nlibs1 = NSAMPLES %/% 2, nlibs2= NSAMPLES - (NSAMPLES %/% 2), percentDE = percentDE)
 }) %>%
@@ -547,7 +546,6 @@ print(p2_cdev_vs_auc.ngene)
 NSAMPLES = 40
 nGene = 10000 
 percentDEs = c(1:9/10) 
-foldChange = 4
 sims_rp <- lapply(percentDEs, function(percentDE) {
     simulate.counts.varyingfc(ngenes = nGene, nlibs1 = NSAMPLES %/% 2, nlibs2= NSAMPLES - (NSAMPLES %/% 2), percentDE = percentDE)
 }) %>%
