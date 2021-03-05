@@ -8,3 +8,11 @@ R notebooks:
 * [cdev-upstream-downstream.Rmd](./notes/cdev-upstream-downstream.Rmd): cdev in relation to upstream processing quality and downstream performance, i.e. DE analysis
 * [cdev-real-data.Rmd](./notes/cdev-real-data.Rmd): behavior of cdev in real data sets
 * [cdev-application.Rmd](./notes/cdev-application.Rmd): application of cdev to compare common normalization methods on simulation and real data
+
+R scripts:
+* [cdev-ground_vs_ground.R](./scripts/cdev-ground_vs_ground.R)
+* [cdev-random_vs_ground.R](./scripts/cdev-random_vs_ground.R)
+* [cdev-random_vs_random.R](./scripts/cdev-random_vs_random.R)
+* [norm_methods-real_data.R](./scripts/norm_methods-real_data.R)
+* [norm_methods-simulation.R](./scripts/norm_methods-simulation.R)
+* 
