@@ -1,0 +1,16 @@
+citHeader("To cite the source code provided in this package in publications use:")
+
+citEntry(
+  entry    = "Article",
+  title    = "cdev: a ground-truth based measure to evaluate RNA-seq normalization methods",
+  author   = Diem-Trang Tran,
+  journal  = ,
+  year     = 2021,
+  volume   = ,
+  number   = ,
+  pages    = ,
+  url      = ,
+  textVersion = paste(
+
+  )
+)
