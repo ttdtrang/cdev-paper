@@ -14,7 +14,7 @@ burd = colorRampPalette(colors = c("blue", "white", "red"))(n = 255)
 rdbu = colorRampPalette(colors = c("blue", "white", "red"))(n = 255)
 blues = colorRampPalette(colors = c('white', 'blue'))(n = 255)
 breakList = seq(-1,1,by = 0.01)
-
+THEME_BASE_SIZE = 13
 is.good.refs = function(cnt_matrix, min.count = 10) {
     and(grepl('ERCC-', rownames(cnt_matrix)), apply(cnt_matrix, 1, min) >= min.count)
 }
@@ -43,7 +43,7 @@ rbm2.cnt = rbm.cnt[,rbm.pheno$ERCC_Mix == 'M2']
 
 ```
 
-```{r}
+```{r,fig.width=8,fig.height=3}
 rbm1.refs.idx = which(is.good.refs(rbm1.cnt))
 rbm1.normed = normalize.by.refs(rbm1.cnt, rbm1.refs.idx)
 rbm1.cnt[rbm1.refs.idx,] %>%
@@ -409,6 +409,24 @@ for (data_prefix in DATASET_PREFIXES) {
     str(get(paste0(data_prefix, '.normed')))
     # str(get(paste0(data_prefix, '.refs.idx')))
 }
+```
+
+### Write plots
+
+```{r,fig.width=8,fig.height=3,eval=FALSE}
+for (data_prefix in DATASET_PREFIXES) {
+    x.cnt = get(sprintf('%s.cnt', data_prefix))
+    x.refs.idx = get(sprintf('%s.refs.idx', data_prefix))
+    p = x.cnt[x.refs.idx,] %>%
+        t() %>%
+        plot.pcp() +
+        theme_bw(base_size = THEME_BASE_SIZE) +
+        theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0),axis.title.x = element_blank()) +
+        ylab('read counts') +
+        ggtitle(data_prefix)
+    ggsave(p, filename = sprintf('ercc_correlation-%s.png', data_prefix),width = 8,height = 3)
+}
+
 ```
 
 ### Write data sets
