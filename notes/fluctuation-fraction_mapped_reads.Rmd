@@ -1,0 +1,70 @@
+---
+title: "Fluctuation in the fraction of ERCC mapped reads, is it concerning?"
+output: html_notebook
+author: Diem-Trang Tran
+---
+
+
+```{r setup, include=FALSE}
+library(magrittr)
+library(ggplot2)
+devtools::load_all('../')
+THEME_BASE_SIZE = 13
+```
+
+## Simulation
+
+```{r}
+NGENES = 4000
+NSAMPLES = 30
+NREFS = 2000
+REPEATS = 1:30
+
+k = 1 - (NREFS  / NGENES)
+sims_c <- 
+    lapply(REPEATS, function(i) {
+        simulate.counts.varyingfc(ngenes = NGENES, nlibs1 = NSAMPLES %/% 2, nlibs2= NSAMPLES - (NSAMPLES %/% 2), percentDE = k)
+    }) %>%
+    set_names(REPEATS)
+    
+sims_c.ref <-
+    lapply(REPEATS, function(i) {
+        # refs <- which(sim$differential == 0)
+        # difs <- which(sim$differential == 1)
+        # sim.cnt = sim$counts
+        # sim.normed = normalize.by.refs(sim$counts, refs)
+        sim = sims_c[[i]]
+        normalize.by.refs(sim$counts, which(sim$differential == 0))
+    }) %>%
+    set_names(REPEATS)
+```
+
+### On a single simulation
+
+#### How much fluctuation in the relative abundance of the true references?
+
+Relative abundance is equivalent to the fraction of mapped reads.
+
+```{r}
+sims_c.rel_abundance = lapply(REPEATS,function(i) {
+    sim = sims_c[[i]]
+    data.frame('sum_relative_abundance' = colSums(sim$counts[which(sim$differential == 0),]) / colSums(sim$counts),
+               'sample' = 1:NSAMPLES,
+               'condition' = sim$conditions$condition,
+               'run' = i)
+}) %>%
+    do.call(rbind, .)
+```
+```{r}
+ggplot(sims_c.rel_abundance) +
+    facet_wrap('run') +
+    geom_boxplot(aes(x=condition,y=sum_relative_abundance))
+i = sample(REPEATS,size = 1)
+p1 = ggplot(sims_c.rel_abundance[sims_c.rel_abundance$run==i,]) +
+    geom_boxplot(aes(x=condition,y=sum_relative_abundance)) +
+    ylab('Fraction of reference counts') +
+    xlab('Simulated condition') +
+    ggtitle(sprintf('Sum of relative abundance\nof non-DE genes in simulation,\nequivalent to fraction \nof mapped reads of spike-ins')) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+ggsave(filename = 'compositional_abundance.png', plot = p1, width = 4,height = 4)
+```
