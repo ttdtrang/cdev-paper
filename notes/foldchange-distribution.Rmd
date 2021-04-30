@@ -1,0 +1,170 @@
+---
+title: "Distribution of fold-changes"
+author: "Trang Tran"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+library(magrittr)
+library(ggplot2)
+library(parallel)
+library(Biobase)
+options(stringsAsFactors = FALSE)
+devtools::load_all('../')
+burd = colorRampPalette(colors = c("blue", "white", "red"))(n = 999)
+blues = colorRampPalette(colors = c('white', 'blue'))(n = 255)
+
+```
+
+## Simulations
+
+```{r}
+NSAMPLES = 40
+nGene = 10000 
+percentDEs = c(1:9/10) 
+sims_rp <- lapply(percentDEs, function(percentDE) {
+    simulate.counts.varyingfc(ngenes = nGene, nlibs1 = NSAMPLES %/% 2, nlibs2= NSAMPLES - (NSAMPLES %/% 2), percentDE = percentDE)
+}) %>%
+    set_names(as.character(percentDEs))
+```
+
+```{r}
+fc_sims = lapply(percentDEs, function(percentDE) {
+    sim = sims_rp[[as.character(percentDE)]]
+    sim.cnt = sim$counts
+    sim.normed = gbnorm::normalize.by.refs(sim.cnt, which(sim$differential == 0))
+    data.frame('gene_id' = 1:nrow(sim.cnt),
+               'log2fc_raw' = logFC(sim$counts, sim$conditions$condition, log.base = 2, pseudocount = 1),
+               'log2fc_norm' = logFC(sim.normed, sim$conditions$condition, log.base = 2, pseudocount = 1),
+               'log2fc_true' = log2(sim$fc),
+               'percentDE' = rep(percentDE, nrow(sim.cnt)))
+}) %>%
+    do.call(rbind, .) 
+```
+
+```{r}
+ggplot(fc_sims) +
+    facet_wrap('percentDE') +
+    geom_histogram(aes(x=log2fc_raw))
+
+ggplot(fc_sims) +
+    facet_wrap('percentDE') +
+    geom_histogram(aes(x=log2fc_norm))
+
+ggplot(fc_sims) +
+    facet_wrap('percentDE') +
+    geom_histogram(aes(x=log2fc_true))
+```
+
+
+
+## Real data sets
+
+```{r}
+load('../data_container.Rdata')
+DATASET_PREFIXES = c('rbm1', 'rbm2',
+                     'rnor1', 'rnor2',
+                     'dmelAV', 'dmelAC', 
+                     'mpreg1a', 'mpreg1b', 'mpreg2a', 'mpreg2b',
+                     'sarcoma', 'lymphoma', 'yfv',
+                     'xtro1m', 'xtro2'
+                     )
+experimental_conditions = c(
+    'rbm1' = 'Organ',
+    'rbm2' = 'Organ',
+    'rnor1' = 'Chemical',
+    'rnor2' = 'Chemical',
+    'mpreg1a' = 'BrainRegion',
+    'mpreg1b' = 'Stage',
+    'mpreg2a' = 'BrainRegion',
+    'mpreg2b' = 'Stage',
+    'dmelAC' = 'Environment',
+    'dmelAV' = 'Environment',
+    'sarcoma' = 'Tissue',
+    'lymphoma' = 'Treatment',
+    'yfv' = 'Infection',
+    'xtro1m' = 'Time.hpf.',
+    'xtro2' = 'Time.hpf.'
+)
+```
+
+```{r}
+fc_real = lapply(names(experimental_conditions), function(data_prefix) {
+    x.cnt = get(paste0(data_prefix,'.cnt'), envir = data.container)
+    x.pheno = get(paste0(data_prefix,'.pheno'), envir = data.container)
+    x.refs.idx = get(paste0(data_prefix,'.refs.idx'), envir = data.container)
+    groups = x.pheno[[experimental_conditions[data_prefix]]]
+    group_pairs = combn(unique(groups),2)
+    
+    lapply(1:ncol(group_pairs), function(i) {
+        selected_groups = group_pairs[,i]
+        x_subset = x.cnt[,groups %in% selected_groups]
+        g_subset = groups[groups %in% selected_groups]
+
+        if (any(table(g_subset) < 3)) { # less than 3 samples per group
+            NULL
+        } else {
+            data.frame('gene_id' = rownames(x.cnt),
+                       'log2fc_raw' = logFC(x_subset, g_subset, log.base = 2, pseudocount = 1),
+                       'log2fc_norm' = logFC(gbnorm::normalize.by.refs(x_subset, x.refs.idx), g_subset, log.base = 2, pseudocount = 1),
+                       'comparison' = paste(selected_groups,collapse = '-'),
+                       'dataset' = rep(data_prefix, nrow(x.cnt)))
+        }
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .) 
+```
+
+### Fold-change distribution on normalized counts
+
+```{r}
+for (data_prefix in unique(fc_real$dataset)) {
+    p = ggplot(fc_real[fc_real$dataset == data_prefix,]) +
+        facet_wrap('comparison') +
+        geom_histogram(aes(x=log2fc_norm),stat='density') +
+        ggtitle(sprintf("%s - FC distribution on normalized counts", data_prefix))
+    print(p)
+}
+```
+Violin plots
+
+```{r}
+for (data_prefix in unique(fc_real$dataset)) {
+    p = ggplot(fc_real[fc_real$dataset == data_prefix,]) +
+        geom_violin(aes(y=log2fc_norm,x=comparison)) +
+        ggtitle(sprintf("%s - FC distribution on normalized counts", data_prefix))
+    print(p)
+}
+```
+
+
+### Fold-change distribution on raw vs normalized counts
+
+```{r}
+for (data_prefix in unique(fc_real$dataset)) {
+    p1 = ggplot(fc_real[fc_real$dataset == data_prefix,]) +
+        facet_wrap('comparison') +
+        geom_histogram(aes(x=log2fc_raw),stat='density') +
+        ggtitle(sprintf("%s - FC distribution on raw counts", data_prefix))
+    p2 = ggplot(fc_real[fc_real$dataset == data_prefix,]) +
+        facet_wrap('comparison') +
+        geom_histogram(aes(x=log2fc_norm),stat='density') +
+        ggtitle(sprintf("%s - FC distribution on normalized counts", data_prefix))
+    print(p1)
+    print(p2)
+}
+```
+
+Violin plots
+
+```{r}
+for (data_prefix in unique(fc_real$dataset)) {
+    x.df = fc_real[fc_real$dataset == data_prefix,c('log2fc_raw', 'log2fc_norm','comparison')]
+    p = reshape2::melt(x.df,id.vars = 'comparison') %>%
+        ggplot() +
+        geom_violin(aes(x=variable,y=value,color=variable)) +
+        ggtitle(data_prefix)
+    print(p)
+}
+```
