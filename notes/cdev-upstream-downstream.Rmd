@@ -20,7 +20,9 @@ logFC = function(x, groups, log.base = 2, pseudocount = 0) {
 THEME_BASE_SIZE = 13
 ```
 
-## Varying number of genes
+## Homogeneous fold-change
+
+### Varying number of genes
 
 ```{r}
 NSAMPLES = 40
@@ -136,7 +138,8 @@ pl_cdev_vs_auc.ngene = ggplot(performance.df) +
     theme_bw(base_size = THEME_BASE_SIZE)
 print(pl_cdev_vs_auc.ngene)
 ```
-## Varying fold-change
+
+### Varying fold-change
 
 ```{r}
 NSAMPLES = 40
@@ -245,7 +248,7 @@ print(pl_cdev_vs_auc.foldchange)
 print(pl_df_vs_auc.foldchange)
 ```
 
-## Varying DE percentage
+### Varying DE percentage
 
 ```{r}
 NSAMPLES = 40
@@ -427,7 +430,7 @@ ggplot(performance.df) +
 #     geom_point(aes(x=diffVarTotal,y=cdev, color=(nGene), group=nGene), alpha = 0.3)
 ```
 
-## Realistic simulations: heterogenous fold-changes
+## Heterogeneous fold-changes
 
 ### Varying number of genes
 
@@ -536,7 +539,8 @@ print(p2_cdev_vs_df.ngene)
 ```{r}
 p2_cdev_vs_auc.ngene = ggplot(performance.df) +
     geom_point(aes(x=cdev,y=AUC, color=nGene, group=nGene), alpha = 0.3) +
-    theme_bw(base_size = THEME_BASE_SIZE)
+    theme_bw(base_size = THEME_BASE_SIZE) +
+    ylim(c(0,1))
 print(p2_cdev_vs_auc.ngene)
 ```
 
@@ -642,7 +646,8 @@ p2_cdev_vs_df.percentDE = ggplot(performance.df) +
 
 p2_cdev_vs_auc.percentDE = ggplot(performance.df) +
     geom_point(aes(x=cdev,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
-    theme_bw(base_size = THEME_BASE_SIZE)
+    theme_bw(base_size = THEME_BASE_SIZE) +
+    ylim(c(0,1))
 print(p2_cdev_vs_df.percentDE)
 print(p2_cdev_vs_auc.percentDE)
 ggplot(performance.df) +
