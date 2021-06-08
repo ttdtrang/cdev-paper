@@ -4,11 +4,9 @@ library(parallel)
 
 
 NCORES = 6
-load('data_container.Rdata')
+load('data/data_container.Rdata')
 
 experimental_conditions = c(
-    'rat1' = 'organ',
-    'rat2' = 'organ',
     'rbm1' = 'Organ',
     'rbm2' = 'Organ',
     'rnor1' = 'Chemical',
@@ -17,7 +15,6 @@ experimental_conditions = c(
     'mpreg1b' = 'Stage',
     'mpreg2a' = 'BrainRegion',
     'mpreg2b' = 'Stage',
-    'dmelA' = 'Environment',
     'dmelAC' = 'Environment',
     'dmelAV' = 'Environment',
     'sarcoma' = 'Tissue',
@@ -39,7 +36,7 @@ norm_methods = list('raw' = raw,
                     'DESeq' = deseq.v1,
                     'DEGES/TMM' = deges.3,
                     'PoissonSeq' = pseq.v1,
-                    'Oracle' = NA)
+                    'Ground-truth' = NA)
 norm_methods$raw <- function(X, group=NA) {
     return(X)
 }
@@ -53,7 +50,7 @@ for (data_prefix in names(experimental_conditions)) {
     group = get(paste0(data_prefix,'.pheno'), envir = data.container)[[condition]]
     REFS.idx = get(paste0(data_prefix,'.refs.idx'), envir = data.container)
 
-    norm_methods$Oracle <- function(X, group = NA) {
+    norm_methods[['Ground-truth']] <- function(X, group = NA) {
         return(normalize.by.refs(X, REFS.idx))
     }
 
@@ -96,5 +93,5 @@ for (data_prefix in names(experimental_conditions)) {
 
 dt = proc.time() - start
 print(sprintf("Time to compute: %s", dt['elapsed']))
-saveRDS(env.all_methods, file = 'real_data_normalized.2.RDS')
+saveRDS(env.all_methods, file = 'real_data_normalized.RDS')
 
