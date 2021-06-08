@@ -34,7 +34,7 @@ norm_methods = list('raw' = raw,
                     'PoissonSeq' = pseq.v1,
                     # 'loess' = NA,
                     # 'RUVg' = NA,
-                    'Oracle' = NA)
+                    'Ground-truth' = NA)
 norm_methods$raw <- function(X, group=NA) {
     return(X)
 }
@@ -47,7 +47,7 @@ dat.all_methods = lapply(percentDEs, function(percentDE) {
     group = sim$conditions$condition
     REFS.idx = which(sim$differential == 0)
 
-    norm_methods$Oracle <- function(X, group = NA) {
+    norm_methods[['Ground-truth']] <- function(X, group = NA) {
         return(normalize.by.refs(X, REFS.idx))
     }
 
