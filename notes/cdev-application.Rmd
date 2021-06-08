@@ -92,11 +92,11 @@ for (percentDE in names(norms.simulation)) {
 percentDEs = as.numeric(names(norms.simulation))
 p_cdev = sapply(names(norms.simulation), function(percentDE) {
     x = norms.simulation[[percentDE]]
-    x$cdevMatrix['Oracle',]
+    x$cdevMatrix['Ground-truth',]
 }) %>%
     reshape2::melt() %>%
     set_names(c('Method', 'percentDE', 'cdev')) %>%
-    subset(.$Method != 'Oracle',TRUE) %>%
+    subset(.$Method != 'Ground-truth',TRUE) %>%
     ggplot(aes(x=percentDE,y=cdev,color=factor(Method, levels = METHODS_ORDERED))) +
     guides(color=guide_legend(title = 'Method')) +
     geom_line() +
@@ -146,7 +146,7 @@ sims_norms.de_performance =
             FN = length(setdiff(setdiff(1:nrow(y), deg.idx), x$refs.idx))
             data.frame('Method' = processing,
                        'percentDE' = as.numeric(percentDE),
-                       'cdev.vs.oracle' = x$cdevMatrix[processing,'Oracle'],
+                       'cdev.vs.oracle' = x$cdevMatrix[processing,'Ground-truth'],
                        'AUC' = auc,
                        'TPR' = TP/length(true_deg.idx),
                        'FDR' = FP / length(deg.idx),
@@ -220,9 +220,10 @@ print(p_fnr)
 Combining plots for publication
 
 ```{r,fig.width=5,fig.height=10}
-egg::ggarrange(p_cdev + theme(axis.title.x = element_blank()),
+p = egg::ggarrange(p_cdev + theme(axis.title.x = element_blank()),
                p_fpr + theme(axis.title.x = element_blank()),
                p_auc, ncol = 1)
+ggsave('comparison-sims-cdev_FPR_AUC.png', plot = p)
 ```
 ```{r,fig.width=10,fig.height=4}
 egg::ggarrange(p_fpr + theme(legend.position = 'none') ,
