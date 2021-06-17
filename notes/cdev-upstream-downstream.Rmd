@@ -749,21 +749,23 @@ ggplot(performance.df) +
 ### cdev vs normalization quality
 
 ```{r,fig.width=8,fig.height=15}
-egg::ggarrange(pl_cdev_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),pl_cdev_vs_auc.ngene + theme(axis.title.x=element_blank()),
+p_cdev_upstream_downstream = egg::ggarrange(pl_cdev_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),pl_cdev_vs_auc.ngene + theme(axis.title.x=element_blank()),
                pl_cdev_vs_df.percentDE + theme(legend.position = 'none',axis.title.x=element_blank()),pl_cdev_vs_auc.percentDE  + theme(axis.title.x=element_blank()),
                pl_cdev_vs_df.foldchange + theme(legend.position = 'none',axis.title.x=element_blank()),pl_cdev_vs_auc.foldchange + theme(axis.title.x=element_blank()),
                p2_cdev_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),p2_cdev_vs_auc.ngene + theme(axis.title.x=element_blank()),
                p2_cdev_vs_df.percentDE + theme(legend.position = 'none'),p2_cdev_vs_auc.percentDE,
                ncol = 2)
+ggsave('cdev-vs-downstream-upstream.png', plot = p_cdev_upstream_downstream)
 ```
 
 ### Fold-change MSE vs normalization quality
 
 ```{r,fig.width=8,fig.height=15}
-egg::ggarrange(pl_mse_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),pl_mse_vs_auc.ngene + theme(axis.title.x=element_blank()),
+p_mse_upstream_downstream = egg::ggarrange(pl_mse_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),pl_mse_vs_auc.ngene + theme(axis.title.x=element_blank()),
                pl_mse_vs_df.percentDE + theme(legend.position = 'none',axis.title.x=element_blank()),pl_mse_vs_auc.percentDE  + theme(axis.title.x=element_blank()),
                pl_mse_vs_df.foldchange + theme(legend.position = 'none',axis.title.x=element_blank()),pl_mse_vs_auc.foldchange + theme(axis.title.x=element_blank()),
                p2_mse_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),p2_mse_vs_auc.ngene + theme(axis.title.x=element_blank()),
                p2_mse_vs_df.percentDE + theme(legend.position = 'none'),p2_mse_vs_auc.percentDE,
                ncol = 2)
+ggsave('mse-vs-downstream-upstream.png', plot = p_mse_upstream_downstream)
 ```
