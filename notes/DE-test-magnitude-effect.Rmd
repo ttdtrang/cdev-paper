@@ -1,0 +1,232 @@
+---
+title: "Effects of scaling on DE tests"
+author: "Trang Tran"
+output: html_notebook
+---
+```{r setup, include = FALSE}
+library(magrittr)
+library(ggplot2)
+library(parallel)
+devtools::load_all('../')
+options(width=120)
+
+alphas = c(1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 2e-1, 3e-1, 4e-1, 5e-1, 6e-1, 7e-1, 8e-1, 9e-1)
+multiples =  setdiff(10^seq(-3,3,1),0)
+NSAMPLES = 30
+NGENES = 4000
+percentDEs = seq(0.1, 0.9, 0.1)
+
+percentDE_labeller = function(x) {
+    return(setNames(paste0('DE Fraction = ',x), x))
+}
+```
+
+## Using `limma`
+
+```{r,fig.width=10,fig.height=8}
+fdr.pDE.limma = lapply(percentDEs, function(percentDE) {
+    
+    sim <- simulate.counts.varyingfc(NGENES, NSAMPLES/2,NSAMPLES/2,percentDE = percentDE)
+    # sim.cnt <- cbind(sim$counts[, sim$differential == 1], sim$counts[, sim$differential == 0])
+    sim.cnt = sim$counts
+    sim.norm.ref = gbnorm::normalize.by.refs(sim.cnt, which(sim$differential == 0))
+     
+    raw.scalingFactors = colSums(sim.cnt[which(sim$differential == 0),])
+    scalingFactors = raw.scalingFactors / gbnorm:::geom.mean(raw.scalingFactors)
+   
+
+    de.results = lapply(multiples, function(j) {
+        de.limma.j = de.test.limma(sim.cnt,
+                                   group = sim$conditions$condition,
+                                   norm.factors = scalingFactors*j)    
+    })  %>%
+        set_names(multiples)
+   
+    lapply(multiples, function(j) {
+        topTags = limma::topTable(de.results[[as.character(j)]], n = Inf, sort.by = 'none', adjust.method = 'BH')
+        lapply(alphas, function(alpha) {
+            deg.idx = which(topTags$adj.P.Val < alpha)
+            TP = length(intersect(which(sim$differential == 1), deg.idx))
+            FP = length(setdiff(deg.idx, which(sim$differential == 1)))
+            data.frame(
+                'percentDE' = percentDE,
+                'xScalingFactors' = j,
+                'significance' = alpha,
+                'TPR' = TP/length(which(sim$differential == 1)),
+                'FDR' = FP / length(deg.idx),
+                'FPR' = FP / length(which(sim$differential == 0)))
+        }) %>%
+            do.call(rbind, .)
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+ggplot(fdr.pDE.limma) +
+    geom_point(aes(x=FPR,y=TPR,group=xScalingFactors,color=xScalingFactors)) +
+    geom_line(aes(x=FPR,y=TPR,group=xScalingFactors,color=xScalingFactors)) +
+    scale_color_gradient2(trans = 'log',breaks=multiples) +
+    facet_wrap('percentDE', labeller = as_labeller(percentDE_labeller)) +
+    ggtitle('ROC curve of limma-DE detection with multiples of norm.factors\non simulation data sets at various percent DEs')
+```
+
+## Using edgeR
+
+```{r,fig.width=10,fig.height=8}
+fdr.pDE.edgeR = lapply(percentDEs, function(percentDE) {
+    
+    sim <- simulate.counts.varyingfc(NGENES, NSAMPLES/2,NSAMPLES/2,percentDE = percentDE)
+    # sim.cnt <- cbind(sim$counts[, sim$differential == 1], sim$counts[, sim$differential == 0])
+    sim.cnt = sim$counts
+    sim.norm.ref = gbnorm::normalize.by.refs(sim.cnt, which(sim$differential == 0))
+     
+    raw.scalingFactors = colSums(sim.cnt[which(sim$differential == 0),])
+    scalingFactors = raw.scalingFactors / gbnorm:::geom.mean(raw.scalingFactors)
+
+    de.results = lapply(multiples, function(j) {
+        de.test.edgeR(sim.cnt,
+                      group = sim$conditions$condition,
+                      norm.factors = scalingFactors*j)
+    })  %>%
+        set_names(multiples)
+   
+    lapply(multiples, function(j) {
+        de = edgeR::topTags(de.results[[as.character(j)]], n = Inf, sort.by = 'none', adjust.method = 'BH')$table
+        lapply(alphas, function(alpha) {
+            deg.idx = which(de$FDR < alpha)
+            TP = length(intersect(which(sim$differential == 1), deg.idx))
+            FP = length(setdiff(deg.idx, which(sim$differential == 1)))
+            data.frame(
+                'percentDE' = percentDE,
+                'xScalingFactors' = j,
+                'significance' = alpha,
+                'TPR' = TP/length(which(sim$differential == 1)),
+                'FDR' = FP / length(deg.idx),
+                'FPR' = FP / length(which(sim$differential == 0)))   
+        }) %>%
+            do.call(rbind, .)
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+ggplot(fdr.pDE.edgeR) +
+    geom_point(aes(x=FPR,y=TPR,group=xScalingFactors,color=xScalingFactors)) +
+    geom_line(aes(x=FPR,y=TPR,group=xScalingFactors,color=xScalingFactors)) +
+    scale_color_gradient2(trans = 'log',breaks=multiples) +
+    facet_wrap('percentDE', labeller = as_labeller(percentDE_labeller)) +
+    ggtitle('ROC curve of edgeR-based DE detection with multiples of norm.factors\non simulation data sets at various percent DEs')
+```
+
+## Using DESeq
+
+```{r,fig.width=10,fig.height=8}
+fdr.pDE.DESeq = lapply(percentDEs, function(percentDE) {
+    
+    sim <- simulate.counts.varyingfc(NGENES, NSAMPLES/2,NSAMPLES/2,percentDE = percentDE)
+    # sim.cnt <- cbind(sim$counts[, sim$differential == 1], sim$counts[, sim$differential == 0])
+    sim.cnt = sim$counts
+    sim.norm.ref = gbnorm::normalize.by.refs(sim.cnt, which(sim$differential == 0))
+     
+    raw.scalingFactors = colSums(sim.cnt[which(sim$differential == 0),])
+    scalingFactors = raw.scalingFactors / gbnorm:::geom.mean(raw.scalingFactors)
+
+    de.results = lapply(multiples, function(j) {
+        de.test.DESeq(sim.cnt,
+                      group = sim$conditions$condition,
+                      norm.factors = scalingFactors*j)
+    })  %>%
+        set_names(multiples)
+   
+    lapply(multiples, function(j) {
+        de = as.data.frame(DESeq2::results(de.results[[as.character(j)]]))
+        lapply(alphas, function(alpha) {
+            deg.idx = which(de$padj < alpha)
+            TP = length(intersect(which(sim$differential == 1), deg.idx))
+            FP = length(setdiff(deg.idx, which(sim$differential == 1)))
+            data.frame(
+                'percentDE' = percentDE,
+                'xScalingFactors' = j,
+                'significance' = alpha,
+                'TPR' = TP/length(which(sim$differential == 1)),
+                'FDR' = FP / length(deg.idx),
+                'FPR' = FP / length(which(sim$differential == 0)))   
+        }) %>%
+            do.call(rbind, .)
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+
+ggplot(fdr.pDE.DESeq) +
+    geom_point(aes(x=FPR,y=TPR,group=xScalingFactors,color=xScalingFactors)) +
+    geom_line(aes(x=FPR,y=TPR,group=xScalingFactors,color=xScalingFactors)) +
+    scale_color_gradient2(trans = 'log',breaks=multiples) +
+    facet_wrap('percentDE', labeller = as_labeller(percentDE_labeller)) +
+    ggtitle('ROC curve of DESeq based DE detection with multiples of norm.factors\non simulation data sets at various percent DEs')
+```
+## Comparing using AUC
+
+```{r,fig.width=10,fig.height=8}
+multiples =  setdiff(10^seq(-4,4,1),0)
+auc.pDE = lapply(percentDEs, function(percentDE) {
+    
+    sim <- simulate.counts.varyingfc(NGENES, NSAMPLES/2,NSAMPLES/2,percentDE = percentDE)
+    sim.cnt = sim$counts
+    sim.norm.ref = gbnorm::normalize.by.refs(sim.cnt, which(sim$differential == 0))
+     
+    raw.scalingFactors = colSums(sim.cnt[which(sim$differential == 0),])
+    scalingFactors = raw.scalingFactors / gbnorm:::geom.mean(raw.scalingFactors)
+
+    de.results = lapply(multiples, function(j) {
+        list('DESeq' = de.test.DESeq(sim.cnt,
+                                     group = sim$conditions$condition,
+                                     norm.factors = scalingFactors*j),
+             'edgeR' = de.test.edgeR(sim.cnt,
+                                     group = sim$conditions$condition,
+                                     norm.factors = scalingFactors*j),
+             'limma' = de.test.limma(sim.cnt,
+                                     group = sim$conditions$condition,
+                                     norm.factors = scalingFactors*j)
+        )
+    })  %>%
+        set_names(multiples)
+   
+    lapply(multiples, function(j) {
+        is.diff = sim$differential == 1
+        
+        de.deseq = as.data.frame(DESeq2::results(de.results[[as.character(j)]][['DESeq']]))
+        de.edger = edgeR::topTags(de.results[[as.character(j)]][['edgeR']], n = Inf, sort.by = 'none', adjust.method = 'BH')$table
+        de.limma = limma::topTable(de.results[[as.character(j)]][['limma']], n = Inf, sort.by = 'none', adjust.method = 'BH')
+        
+        auc.deseq = auroc(1-de.deseq$padj, is.diff)
+        auc.edgeR = auroc(1-de.edger$FDR, is.diff)
+        auc.limma = auroc(1-de.limma$adj.P.Val, is.diff)
+        
+        data.frame(
+            'percentDE' = percentDE,
+            'xScalingFactors' = j,
+            'auc.DESeq' = auc.deseq,
+            'auc.edgeR' = auc.edgeR,
+            'auc.limma' = auc.limma
+        )
+    }) %>%
+        do.call(rbind, .)
+}) %>%
+    do.call(rbind, .)
+```
+
+```{r,fig.width=10,fig.height=8}
+auc.pDE.df = reshape2::melt(auc.pDE, id.vars = c('percentDE', 'xScalingFactors')) %>%
+    set_names(c('percentDE', 'xScalingFactors', 'Method', 'AUROC'))
+levels(auc.pDE.df$Method) = c('DESeq', 'edgeR', 'limma')
+str(auc.pDE.df)
+
+ggplot(auc.pDE.df) +
+    facet_wrap('percentDE', labeller = as_labeller(percentDE_labeller)) +
+    geom_point(aes(x=xScalingFactors,y=AUROC,color=Method)) +
+    geom_line(aes(x=xScalingFactors,y=AUROC,color=Method)) +
+    scale_x_log10() +
+    ggtitle('Area under the ROC curve of DE detection\nas the function of scaling magnitude')
+```
+
