@@ -59,14 +59,15 @@ sims_g.rand.norms =
                 raw = colSums(sim$counts[rand.subset,,drop= FALSE])
                 sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
                 scalingFactors = raw / geom.mean(raw)
-                
+                mse_ref = mean((logFC(sim.norm.i[trueRef.idx,], sim$conditions$condition, log.base = 2, pseudocount = 1))^2)
                 return(list('scalingFactors' = scalingFactors,
                             'nGene' = nGene,
                             'rand.subset' = rand.subset,
                             'diffFraction' = n_diff/NSCALE,
                             'n_diffs_in_scale' = n_diff,
                             'diffVarTotal' = sum(var(sim$counts[rand.dif,])), # The total variance of the DE genes in the random set selected for scaling
-                            'cdev' =  cdev(sim.norm.i, sim.norm.ref)))
+                            'cdev' =  cdev(sim.norm.i, sim.norm.ref),
+                            'mse' = mse_ref))
             }) 
         }) %>%
         unlist(recursive = FALSE)
@@ -74,7 +75,7 @@ sims_g.rand.norms =
     unlist(recursive = FALSE)
 ```
 
-### DE tests
+#### DE tests
 
 ```{r, message=FALSE}
 g_de.results = lapply(sims_g.rand.norms, function(sim.norm) {
@@ -100,6 +101,7 @@ performance.df = lapply(1:length(sims_g.rand.norms), function(i) {
     idx.diff = sim.norm$rand.subset[which(sim$differential[sim.norm$rand.subset] == 1)]
     
     data.frame('cdev' = sim.norm$cdev,
+               'mse' = sim.norm$mse,
                'nGene' = sim.norm$nGene,
                'diffFraction' = sim.norm$diffFraction,
                'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
@@ -122,7 +124,9 @@ ggplot(performance.df) +
 #     geom_point(aes(x=diffVarTotal,y=cdev, color=(nGene), group=nGene), alpha = 0.3)
 ```
 
-cdev vs reference set quality
+#### Relating to normalization quality 
+
+##### cdev vs reference set quality
 
 ```{r}
 pl_cdev_vs_df.ngene = ggplot(performance.df) +
@@ -130,13 +134,32 @@ pl_cdev_vs_df.ngene = ggplot(performance.df) +
     theme_bw(base_size = THEME_BASE_SIZE)
 print(pl_cdev_vs_df.ngene)
 ```
-cdev vs DE performance
+
+##### cdev vs DE performance
 
 ```{r}
 pl_cdev_vs_auc.ngene = ggplot(performance.df) +
     geom_point(aes(x=cdev,y=AUC, color=nGene, group=nGene), alpha = 0.3) +
     theme_bw(base_size = THEME_BASE_SIZE)
 print(pl_cdev_vs_auc.ngene)
+```
+
+##### MSE vs reference set quality
+
+```{r}
+pl_mse_vs_df.ngene = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=mse, color=nGene, group=nGene), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+print(pl_mse_vs_df.ngene)
+```
+
+##### MSE vs DE performance
+
+```{r}
+pl_mse_vs_auc.ngene = ggplot(performance.df) +
+    geom_point(aes(x=mse,y=AUC, color=nGene, group=nGene), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+print(pl_mse_vs_auc.ngene)
 ```
 
 ### Varying fold-change
@@ -192,7 +215,7 @@ sims_f.rand.norms =
     unlist(recursive = FALSE)
 ```
 
-### DE tests
+#### DE tests
 
 ```{r, message=FALSE}
 f_de.results = lapply(sims_f.rand.norms, function(sim.norm) {
@@ -204,6 +227,8 @@ f_de.results = lapply(sims_f.rand.norms, function(sim.norm) {
         limma::topTable(n = Inf, sort.by = 'none', adjust.method = 'BH')
 })
 ```
+
+#### Relating to normalization quality
 
 ```{r}
 performance.df = lapply(1:length(sims_f.rand.norms), function(i) {
@@ -219,6 +244,7 @@ performance.df = lapply(1:length(sims_f.rand.norms), function(i) {
     idx.diff = sim.norm$rand.subset[which(sim$differential[sim.norm$rand.subset] == 1)]
     
     data.frame('cdev' = sim.norm$cdev,
+               'mseRefs' = sim.norm$mseRefs,
                'foldChange' = sim.norm$foldChange,
                'diffFraction' = sim.norm$diffFraction,
                'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
@@ -246,7 +272,21 @@ pl_cdev_vs_auc.foldchange = ggplot(performance.df) +
 print(pl_cdev_vs_df.foldchange)
 print(pl_cdev_vs_auc.foldchange)
 print(pl_df_vs_auc.foldchange)
+
+pl_mse_vs_df.foldchange = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=mseRefs, color=foldChange, group=foldChange), alpha = 0.5) +
+    # guides(color=guide_legend(title = 'Fold-change')) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+pl_mse_vs_auc.foldchange = ggplot(performance.df) +
+    geom_point(aes(x=mseRefs,y=AUC, color=foldChange, group=foldChange), alpha = 0.5) +
+    # guides(color=guide_legend(title = 'Fold-change')) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+
+print(pl_mse_vs_df.foldchange)
+print(pl_mse_vs_auc.foldchange)
+
 ```
+
 
 ### Varying DE percentage
 
@@ -289,14 +329,15 @@ sims_p.rand.norms =
                 raw = colSums(sim$counts[rand.subset,,drop= FALSE])
                 sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
                 scalingFactors = raw / geom.mean(raw)
-                
+                mseRefs = mean((logFC(sim.norm.i[trueRef.idx,], sim$conditions$condition, log.base = 2, pseudocount = 1))^2) 
                 return(list('scalingFactors' = scalingFactors,
                             'percentDE' = percentDE,
                             'rand.subset' = rand.subset,
                             'n_diffs_in_scale' = n_diff,
                             'diffFraction' = n_diff/NSCALE,
                             'diffVarTotal' = sum(var(sim$counts[rand.dif,])), # The total variance of the DE genes in the random set selected for scaling
-                            'cdev' =  cdev(sim.norm.i, sim.norm.ref)))
+                            'cdev' =  cdev(sim.norm.i, sim.norm.ref),
+                            'mseRefs' = mseRefs))
             }) 
         }) %>%
         unlist(recursive = FALSE)
@@ -304,7 +345,7 @@ sims_p.rand.norms =
     unlist(recursive = FALSE)
 ```
 
-### DE tests
+#### DE tests
 
 ```{r, message=FALSE}
 p_de.results = lapply(sims_p.rand.norms, function(sim.norm) {
@@ -316,6 +357,8 @@ p_de.results = lapply(sims_p.rand.norms, function(sim.norm) {
         limma::topTable(n = Inf, sort.by = 'none', adjust.method = 'BH')
 })
 ```
+
+#### Relating to normalization quality
 
 ```{r}
 performance.df = lapply(1:length(sims_p.rand.norms), function(i) {
@@ -331,6 +374,7 @@ performance.df = lapply(1:length(sims_p.rand.norms), function(i) {
     idx.diff = sim.norm$rand.subset[which(sim$differential[sim.norm$rand.subset] == 1)]
     
     data.frame('cdev' = sim.norm$cdev,
+               'mseRefs' = sim.norm$mseRefs,
                'percentDE' = sim.norm$percentDE,
                'diffFraction' = sim.norm$diffFraction,
                'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
@@ -396,6 +440,8 @@ sims_p.rand.norms =
     }) %>%
     unlist(recursive = FALSE)
 ```
+
+#### Relating to normalization quality
 
 ```{r}
 performance.df = lapply(1:length(sims_p.rand.norms), function(i) {
@@ -493,6 +539,8 @@ rg_de.results = lapply(sims_rg.rand.norms, function(sim.norm) {
         limma::topTable(n = Inf, sort.by = 'none', adjust.method = 'BH')
 })
 ```
+
+#### Relating to normalization quality
 
 ```{r,fig.width=15,fig.height=4}
 performance.df = lapply(1:length(sims_rg.rand.norms), function(i) {
@@ -611,6 +659,8 @@ rp_de.results = lapply(sims_rp.rand.norms, function(sim.norm) {
         limma::topTable(n = Inf, sort.by = 'none', adjust.method = 'BH')
 })
 ```
+
+#### Relating to normalization quality
 
 ```{r}
 performance.df = lapply(1:length(sims_rp.rand.norms), function(i) {
