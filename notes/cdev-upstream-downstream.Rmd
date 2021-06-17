@@ -603,6 +603,21 @@ p2_cdev_vs_auc.ngene = ggplot(performance.df) +
 print(p2_cdev_vs_auc.ngene)
 ```
 
+```{r}
+p2_mse_vs_df.ngene = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=mseRefs, color=nGene, group=nGene), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+print(p2_mse_vs_df.ngene)
+```
+
+```{r}
+p2_mse_vs_auc.ngene = ggplot(performance.df) +
+    geom_point(aes(x=mseRefs,y=AUC, color=nGene, group=nGene), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE) +
+    ylim(c(0,1))
+print(p2_mse_vs_auc.ngene)
+```
+
 ### Varying DE percentage
 
 ```{r}
@@ -713,14 +728,14 @@ p2_cdev_vs_auc.percentDE = ggplot(performance.df) +
     ylim(c(0,1))
 
 p2_mse_vs_df.percentDE = ggplot(performance.df) +
-    geom_point(aes(x=diffFraction,y=mse, color=percentDE, group=percentDE), alpha = 0.3) +
+    geom_point(aes(x=diffFraction,y=mseRefs, color=percentDE, group=percentDE), alpha = 0.3) +
     theme_bw(base_size = THEME_BASE_SIZE)
 # ggplot(performance.df) +
 #     geom_point(aes(x=diffFraction,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
 #     theme_bw(base_size = THEME_BASE_SIZE)
 
 p2_mse_vs_auc.percentDE = ggplot(performance.df) +
-    geom_point(aes(x=mse,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
+    geom_point(aes(x=mseRefs,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
     theme_bw(base_size = THEME_BASE_SIZE) +
     ylim(c(0,1))
 print(p2_cdev_vs_df.percentDE)
