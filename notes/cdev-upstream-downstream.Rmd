@@ -395,6 +395,16 @@ pl_cdev_vs_auc.percentDE = ggplot(performance.df) +
     theme_bw(base_size = THEME_BASE_SIZE)
 print(pl_cdev_vs_df.percentDE)
 print(pl_cdev_vs_auc.percentDE)
+
+pl_mse_vs_df.percentDE = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=mseRefs, color=percentDE, group=percentDE), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+
+pl_mse_vs_auc.percentDE = ggplot(performance.df) +
+    geom_point(aes(x=mseRefs,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+print(pl_mse_vs_df.percentDE)
+print(pl_mse_vs_auc.percentDE)
 ```
 
 ```{r,fig.width=5,fig.height=12}
@@ -441,7 +451,6 @@ sims_p.rand.norms =
     unlist(recursive = FALSE)
 ```
 
-#### Relating to normalization quality
 
 ```{r}
 performance.df = lapply(1:length(sims_p.rand.norms), function(i) {
@@ -512,14 +521,15 @@ sims_rg.rand.norms =
                 raw = colSums(sim$counts[rand.subset,,drop= FALSE])
                 sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
                 scalingFactors = raw / geom.mean(raw)
-                
+                mseRefs = mean((logFC(sim.norm.i[trueRef.idx,], sim$conditions$condition, log.base = 2, pseudocount = 1))^2) 
                 return(list('scalingFactors' = scalingFactors,
                             'nGene' = nGene,
                             'rand.subset' = rand.subset,
                             'diffFraction' = n_diff/NSCALE,
                             'n_diffs_in_scale' = n_diff,
                             'diffVarTotal' = sum(var(sim$counts[rand.dif,])), # The total variance of the DE genes in the random set selected for scaling
-                            'cdev' =  cdev(sim.norm.i, sim.norm.ref)))
+                            'cdev' =  cdev(sim.norm.i, sim.norm.ref),
+                            'mseRefs' = mseRefs))
             }) 
         }) %>%
         unlist(recursive = FALSE)
@@ -555,6 +565,7 @@ performance.df = lapply(1:length(sims_rg.rand.norms), function(i) {
     idx.diff = sim.norm$rand.subset[which(sim$differential[sim.norm$rand.subset] == 1)]
     
     data.frame('cdev' = sim.norm$cdev,
+               'mseRefs' = sim.norm$mseRefs,
                'nGene' = sim.norm$nGene,
                'diffFraction' = sim.norm$diffFraction,
                'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
@@ -632,14 +643,15 @@ sims_rp.rand.norms =
                 raw = colSums(sim$counts[rand.subset,,drop= FALSE])
                 sim.norm.i = normalize.by.refs(sim$counts, rand.subset)
                 scalingFactors = raw / geom.mean(raw)
-                
+                mseRefs = mean((logFC(sim.norm.i[trueRef.idx,], sim$conditions$condition, log.base = 2, pseudocount = 1))^2) 
                 return(list('scalingFactors' = scalingFactors,
                             'percentDE' = percentDE,
                             'rand.subset' = rand.subset,
                             'n_diffs_in_scale' = n_diff,
                             'diffFraction' = n_diff/NSCALE,
                             'diffVarTotal' = sum(var(sim$counts[rand.dif,])), # The total variance of the DE genes in the random set selected for scaling
-                            'cdev' =  cdev(sim.norm.i, sim.norm.ref)))
+                            'cdev' =  cdev(sim.norm.i, sim.norm.ref),
+                            'mseRefs' = mseRefs))
             }) 
         }) %>%
         unlist(recursive = FALSE)
@@ -676,6 +688,7 @@ performance.df = lapply(1:length(sims_rp.rand.norms), function(i) {
     idx.diff = sim.norm$rand.subset[which(sim$differential[sim.norm$rand.subset] == 1)]
     
     data.frame('cdev' = sim.norm$cdev,
+               'mseRefs' = sim.norm$mseRefs,
                'percentDE' = sim.norm$percentDE,
                'diffFraction' = sim.norm$diffFraction,
                'n_diffs_in_scale' = sim.norm$n_diffs_in_scale,
@@ -698,8 +711,23 @@ p2_cdev_vs_auc.percentDE = ggplot(performance.df) +
     geom_point(aes(x=cdev,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
     theme_bw(base_size = THEME_BASE_SIZE) +
     ylim(c(0,1))
+
+p2_mse_vs_df.percentDE = ggplot(performance.df) +
+    geom_point(aes(x=diffFraction,y=mse, color=percentDE, group=percentDE), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE)
+# ggplot(performance.df) +
+#     geom_point(aes(x=diffFraction,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
+#     theme_bw(base_size = THEME_BASE_SIZE)
+
+p2_mse_vs_auc.percentDE = ggplot(performance.df) +
+    geom_point(aes(x=mse,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
+    theme_bw(base_size = THEME_BASE_SIZE) +
+    ylim(c(0,1))
 print(p2_cdev_vs_df.percentDE)
 print(p2_cdev_vs_auc.percentDE)
+print(p2_mse_vs_df.percentDE)
+print(p2_mse_vs_auc.percentDE)
+
 ggplot(performance.df) +
     facet_wrap('percentDE') +
     geom_point(aes(x=cdev,y=AUC, color=percentDE, group=percentDE), alpha = 0.3) +
@@ -718,6 +746,7 @@ ggplot(performance.df) +
 
 ## Combining plots for publication figure
 
+### cdev vs normalization quality
 
 ```{r,fig.width=8,fig.height=15}
 egg::ggarrange(pl_cdev_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),pl_cdev_vs_auc.ngene + theme(axis.title.x=element_blank()),
@@ -728,3 +757,13 @@ egg::ggarrange(pl_cdev_vs_df.ngene + theme(legend.position = 'none',axis.title.x
                ncol = 2)
 ```
 
+### Fold-change MSE vs normalization quality
+
+```{r,fig.width=8,fig.height=15}
+egg::ggarrange(pl_mse_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),pl_mse_vs_auc.ngene + theme(axis.title.x=element_blank()),
+               pl_mse_vs_df.percentDE + theme(legend.position = 'none',axis.title.x=element_blank()),pl_mse_vs_auc.percentDE  + theme(axis.title.x=element_blank()),
+               pl_mse_vs_df.foldchange + theme(legend.position = 'none',axis.title.x=element_blank()),pl_mse_vs_auc.foldchange + theme(axis.title.x=element_blank()),
+               p2_mse_vs_df.ngene + theme(legend.position = 'none',axis.title.x=element_blank()),p2_mse_vs_auc.ngene + theme(axis.title.x=element_blank()),
+               p2_mse_vs_df.percentDE + theme(legend.position = 'none'),p2_mse_vs_auc.percentDE,
+               ncol = 2)
+```
