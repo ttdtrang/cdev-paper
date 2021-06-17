@@ -14,7 +14,7 @@ burd = colorRampPalette(colors = c("blue", "white", "red"))(n = 255)
 rdbu = colorRampPalette(colors = c("blue", "white", "red"))(n = 255)
 blues = colorRampPalette(colors = c('white', 'blue'))(n = 255)
 breakList = seq(-1,1,by = 0.01)
-THEME_BASE_SIZE = 13
+THEME_BASE_SIZE = 11
 is.good.refs = function(cnt_matrix, min.count = 10) {
     and(grepl('ERCC-', rownames(cnt_matrix)), apply(cnt_matrix, 1, min) >= min.count)
 }
@@ -413,6 +413,8 @@ for (data_prefix in DATASET_PREFIXES) {
 
 ### Write plots
 
+Parallel coordinate plots
+
 ```{r,fig.width=8,fig.height=3,eval=FALSE}
 for (data_prefix in DATASET_PREFIXES) {
     x.cnt = get(sprintf('%s.cnt', data_prefix))
@@ -428,6 +430,33 @@ for (data_prefix in DATASET_PREFIXES) {
 }
 
 ```
+
+PCP and histogram
+
+```{r,fig.width=8,fig.height=3,eval=FALSE}
+for (data_prefix in DATASET_PREFIXES) {
+    x.cnt = get(sprintf('%s.cnt', data_prefix))
+    x.refs.idx = get(sprintf('%s.refs.idx', data_prefix))
+    p1 = x.cnt[x.refs.idx,] %>%
+        t() %>%
+        plot.pcp() +
+        theme_bw(base_size = THEME_BASE_SIZE) +
+        theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0),axis.title.x = element_blank()) +
+        ylab('read counts') +
+        ggtitle(data_prefix)
+    ercc.cor = x.cnt[x.refs.idx,] %>% t() %>% cor()
+    p2 = data.frame('pcc' = ercc.cor[upper.tri(ercc.cor)]) %>%
+        ggplot() +
+        geom_histogram(aes(x=pcc)) +
+        xlim(c(0.5,1)) +
+        theme_bw(base_size = THEME_BASE_SIZE) +
+        xlab('Correlation')
+    p = egg::ggarrange(p1,p2,nrow=1,widths = c(4,1))
+    ggsave(plot = p, filename = sprintf('ercc_correlation_histogram-%s.png', data_prefix),width = 8,height = 3)
+}
+
+```
+
 
 ### Write data sets
 
